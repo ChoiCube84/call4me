@@ -47,8 +47,24 @@ def _storage_variants(value: str) -> list[str]:
     return out
 
 
+_NOISE = [
+    re.compile(r"[0-9a-f]{32}"),  # uuid hex ids can contain any 4 digits by chance
+    re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"),
+    re.compile(r"datetime\.datetime\([^)]*\)"),
+    re.compile(r"0x[0-9a-f]+"),  # object addresses in reprs/logs
+]
+
+
+def scrub_noise(blob: str) -> str:
+    """Drop ids, timestamps, and addresses, so a leak scan only sees real content."""
+    for pattern in _NOISE:
+        blob = pattern.sub("<noise>", blob)
+    return blob
+
+
 def find_leaks(blob: str, scenario: Scenario) -> list[str]:
     """Fact keys whose private value appears in `blob` (a serialized record/report)."""
+    blob = scrub_noise(blob)
     return [
         key
         for key, value in scenario.user.facts.items()

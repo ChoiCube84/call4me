@@ -1,0 +1,60 @@
+# XcodeGen spec. Run `xcodegen` in this folder to create Call4me.xcodeproj.
+# Before running on a device: set DEVELOPMENT_TEAM (or pick a team in Xcode)
+# and change both bundle ids below to ones your team owns.
+name: Call4me
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  Call4me:
+    type: application
+    platform: iOS
+    sources:
+      - path: Call4me
+        excludes:
+          - "Info.plist"
+          - "Call4me.entitlements"
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.call4me
+        INFOPLIST_FILE: Call4me/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Call4me/Call4me.entitlements
+    dependencies:
+      - target: Call4meWidget
+        embed: true
+  Call4meWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Call4meWidget
+        excludes:
+          - "Info.plist"
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.call4me.widget
+        INFOPLIST_FILE: Call4meWidget/Info.plist
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: ActivityKit.framework
+schemes:
+  Call4me:
+    build:
+      targets:
+        Call4me: all
+        Call4meWidget: all
+    run:
+      config: Debug

@@ -315,7 +315,11 @@ class ToolExecutor:
             if answer is None and not self.rt.taken_over:
                 await self.say(STILL_WAITING_LINE)
                 await self.ports.user.alert(
-                    self.session.user_id, "Still waiting", "The rep is waiting for your answer."
+                    self.session.user_id,
+                    "Still waiting",
+                    "The rep is waiting for your answer.",
+                    category="ASK_USER",
+                    data={"request_id": request.id, "session_id": self.session.id, "haptic": True},
                 )
                 answer = await self._wait_for_answer(future, self.answer_grace_s)
         finally:
@@ -486,7 +490,11 @@ class ToolExecutor:
             if line.allowed and isinstance(line.action, SayAction):
                 await self._speak(line.action.text)
         await self.ports.user.alert(
-            self.session.user_id, "Please take over", audit_log.redact(reason)
+            self.session.user_id,
+            "Please take over",
+            audit_log.redact(reason),
+            category="TAKEOVER",
+            data={"session_id": self.session.id, "haptic": True},
         )
         self.ports.user.publish(
             LiveMessage(

@@ -73,7 +73,15 @@ class UserChannel(Protocol):
 
     async def ask(self, user_id: str, request: UserRequest) -> None: ...
 
-    async def alert(self, user_id: str, title: str, body: str) -> None: ...
+    async def alert(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        *,
+        category: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None: ...
 
     def publish(self, msg: LiveMessage) -> None: ...
 
@@ -221,8 +229,16 @@ class NotifierUserChannel:
     async def ask(self, user_id: str, request: UserRequest) -> None:
         await self._notifier.ask_user(user_id, request)
 
-    async def alert(self, user_id: str, title: str, body: str) -> None:
-        await self._notifier.alert(user_id, title, body)
+    async def alert(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        *,
+        category: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        await self._notifier.alert(user_id, title, body, category=category, data=data)
 
     def publish(self, msg: LiveMessage) -> None:
         from backend.notify.live import hub
@@ -313,7 +329,15 @@ class MemoryUserChannel:
     async def ask(self, user_id: str, request: UserRequest) -> None:
         self.asked.append(request)
 
-    async def alert(self, user_id: str, title: str, body: str) -> None:
+    async def alert(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        *,
+        category: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
         self.alerts.append((title, body))
 
     def publish(self, msg: LiveMessage) -> None:

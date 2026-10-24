@@ -65,6 +65,7 @@ class ConversationAgent:
         self.filler_after_s = filler_after_s
         self._lock = asyncio.Lock()
         self._failures = 0
+        self._heard_during_takeover: list[str] = []
 
     @property
     def session(self) -> CallSession:
@@ -81,8 +82,12 @@ class ConversationAgent:
             return
         async with self._lock:
             self.runtime.remote_history.append(redacted)
-            if self.runtime.taken_over or self.runtime.ended:
-                return  # the user is typing; the agent stays silent
+            if self.runtime.taken_over:
+                # The user is typing; stay silent, but remember what the rep said for handback.
+                self._heard_during_takeover.append(redacted)
+                return
+            if self.runtime.ended:
+                return
             self._append_user_text(f"Rep: {redacted}")
             await self._run_turn()
 
@@ -105,8 +110,11 @@ class ConversationAgent:
             await self.ports.control.transition(
                 self.session, CallState.IN_CONVERSATION, "user handed back"
             )
+        heard = "\n".join(f"Rep: {line}" for line in self._heard_during_takeover)
+        self._heard_during_takeover.clear()
         self._append_user_text(
             "[System] The user handed the call back to you. Continue toward the goal."
+            + (f" While the user was typing, the rep said:\n{heard}" if heard else "")
         )
 
     def on_user_typed(self, text: str) -> None:

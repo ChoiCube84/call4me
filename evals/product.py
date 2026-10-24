@@ -9,7 +9,7 @@ to check at merge time:
   (sync or async).
 - the system under test as a whole: a factory `make_eval_driver(session) -> CallDriver`
   (see `evals.driver.CallDriver`). Looked up from `$CALL4ME_EVAL_DRIVER`
-  ("module:function"), else `backend.agent.conversation:make_eval_driver`.
+  ("module:function"), else `evals.product_driver:make_eval_driver`.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from evals.driver import BaselineDriver, CallDriver
 GuardFn = Callable[[AgentAction, CallSession], GuardResult | Awaitable[GuardResult]]
 DriverFactory = Callable[[CallSession], CallDriver]
 
-DEFAULT_DRIVER_PATH = "backend.agent.conversation:make_eval_driver"
+DEFAULT_DRIVER_PATH = "evals.product_driver:make_eval_driver"
 
 
 class ComponentMissing(RuntimeError):

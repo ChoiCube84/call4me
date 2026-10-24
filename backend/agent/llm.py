@@ -189,9 +189,9 @@ class MockLLMClient(LLMClient):
             ]
         if re.search(r"social security|card number|password", low):
             return [_tool("request_takeover", reason="The rep needs high-sensitivity info.")]
-        if re.search(r"\b(pin|passcode|account number|date of birth|zip code)\b", low):
+        if re.search(r"\b(pin|passcode|order number|account number|date of birth|zip code)\b", low):
             what = re.search(
-                r"\b(pin|passcode|account number|date of birth|zip code)\b", low
+                r"\b(pin|passcode|order number|account number|date of birth|zip code)\b", low
             ).group(1)
             return [
                 _tool(

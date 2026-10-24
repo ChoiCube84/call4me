@@ -24,3 +24,9 @@ ios/Call4me.xcodeproj/
 node_modules/
 .next/
 fakeline/audio/
+
+# Local Convex deployments and generated build/test artifacts
+.convex/
+.runtime/
+web/out/
+*.tsbuildinfo

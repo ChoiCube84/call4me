@@ -19,11 +19,9 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import calls
 from backend.agent import guard
@@ -41,14 +39,13 @@ from backend.contracts import (
     utcnow,
 )
 from backend.db import companies
+from backend.db.convex_client import StorageConflict, close_client
 from backend.db.models import (
-    AuditLogRow,
-    CallEventRow,
     CallSessionRow,
     DeviceRow,
     UserRequestRow,
 )
-from backend.db.session import get_db, init_db
+from backend.db.store import Store, get_store, init_store
 from backend.notify.apns import close_notifier
 from backend.notify.live import answers, hub
 from backend.telemetry import setup_telemetry
@@ -56,7 +53,7 @@ from backend.telephony.phone_client import router as phone_router
 
 log = logging.getLogger("call4me")
 
-Db = Annotated[AsyncSession, Depends(get_db)]
+Db = Annotated[Store, Depends(get_store)]
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -78,16 +75,29 @@ async def _sync_cartesia() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    await init_db()
+    await init_store()
+    writer = None
+    if get_settings().storage_backend == "convex":
+        from backend.notify.convex_live import ConvexLiveWriter
+
+        writer = ConvexLiveWriter()
+        writer.start()
+        hub.sink = writer.publish
     sync = None
     if get_settings().telephony_mode == "cartesia" and app.state.start_calls:
         sync = asyncio.create_task(_sync_cartesia())
-    yield
-    if sync is not None:
-        sync.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sync
-    await close_notifier()
+    try:
+        yield
+    finally:
+        if sync is not None:
+            sync.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sync
+        hub.sink = None
+        if writer is not None:
+            await writer.close()
+        await close_notifier()
+        await close_client()
 
 
 app = FastAPI(title="call4me", lifespan=lifespan)
@@ -95,6 +105,13 @@ app.add_middleware(TokenAuthMiddleware)  # no-op unless API_TOKEN is set
 setup_telemetry(app)  # no-op without APPLICATIONINSIGHTS_CONNECTION_STRING
 # Tests turn this off to exercise the API without running a call pipeline.
 app.state.start_calls = True
+
+
+@app.exception_handler(StorageConflict)
+async def storage_conflict(_request: Any, _exc: StorageConflict) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": "Record changed; retry the operation"})
+
+
 # Cartesia calls: its event webhook and our webhook tools (TELEPHONY=cartesia).
 app.include_router(cartesia_router)
 # Backup demo with our own pipeline (TELEPHONY=phone): the page at /phone is the rep.
@@ -219,14 +236,14 @@ def _to_session(row: CallSessionRow) -> CallSession:
     )
 
 
-async def _get_session_row(db: AsyncSession, call_id: str) -> CallSessionRow:
+async def _get_session_row(db: Store, call_id: str) -> CallSessionRow:
     row = await db.get(CallSessionRow, call_id)
     if row is None:
         raise HTTPException(404, "call not found")
     return row
 
 
-async def _record_user_action(db: AsyncSession, row: CallSessionRow, action: str) -> None:
+async def _record_user_action(db: Store, row: CallSessionRow, action: str) -> None:
     await audit.append(db, actor="user", action=action, subject=row.id, reason=f"user {action}")
     await audit.record_event(db, CallEvent(session_id=row.id, kind=action))
     await db.commit()
@@ -282,20 +299,13 @@ async def start_call(body: StartCallIn, db: Db) -> CallSession:
 
 @app.get("/calls", response_model=list[CallSession])
 async def list_calls(db: Db, user_id: str | None = None, limit: int = 20) -> list[CallSession]:
-    q = select(CallSessionRow).order_by(CallSessionRow.started_at.desc()).limit(min(limit, 100))
-    if user_id:
-        q = q.where(CallSessionRow.user_id == user_id)
-    return [_to_session(r) for r in (await db.scalars(q)).all()]
+    return [_to_session(r) for r in await db.calls(user_id, max(1, min(limit, 100)))]
 
 
 @app.get("/calls/{call_id}", response_model=CallOut)
 async def get_call(call_id: str, db: Db) -> CallOut:
     row = await _get_session_row(db, call_id)
-    events = (
-        await db.scalars(
-            select(CallEventRow).where(CallEventRow.session_id == call_id).order_by(CallEventRow.at)
-        )
-    ).all()
+    events = await db.events(call_id)
     return CallOut(
         session=_to_session(row),
         timeline=[
@@ -316,14 +326,7 @@ async def get_call(call_id: str, db: Db) -> CallOut:
 async def call_audit(call_id: str, db: Db) -> list[AuditOut]:
     """The append-only audit trail for a call (already redacted when written)."""
     await _get_session_row(db, call_id)
-    request_ids = select(UserRequestRow.id).where(UserRequestRow.session_id == call_id)
-    rows = (
-        await db.scalars(
-            select(AuditLogRow)
-            .where((AuditLogRow.subject == call_id) | AuditLogRow.subject.in_(request_ids))
-            .order_by(AuditLogRow.at)
-        )
-    ).all()
+    rows = await db.audit(call_id)
     return [
         AuditOut(
             at=r.at,
@@ -435,11 +438,17 @@ async def answer_request(request_id: str, body: AnswerIn, db: Db) -> Accepted:
 
     # Register first so nothing downstream can log the raw value.
     audit.register_secret(req.session_id, body.answer)
-    delivered = answers.deliver(request_id, body.answer)
-
     req.status = UserRequestStatus.ANSWERED
     req.answered_at = utcnow()
-    # Closes the question on every screen (and in the replay a reconnecting phone gets).
+    await audit.append(
+        db,
+        actor="user",
+        action="user_request.answered",
+        subject=request_id,
+        reason="user answered",
+    )
+    await db.commit()
+    delivered = answers.deliver(request_id, body.answer)
     hub.publish(
         LiveMessage(
             type="event",
@@ -447,14 +456,6 @@ async def answer_request(request_id: str, body: AnswerIn, db: Db) -> Accepted:
             data={"kind": "ask_user_answered", "request_id": request_id},
         )
     )
-    await audit.append(
-        db,
-        actor="user",
-        action="user_request.answered",
-        subject=request_id,
-        reason="user answered" + ("" if delivered else " (no agent waiting)"),
-    )
-    await db.commit()
     return Accepted(detail="delivered" if delivered else "recorded")
 
 

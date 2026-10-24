@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+if TYPE_CHECKING:
+    from backend.db.store import Store
 
 from backend.contracts import CallEvent
 from backend.db.models import AuditLogRow, CallEventRow
@@ -90,7 +91,7 @@ def redact(payload: Any) -> Any:
 
 
 async def append(
-    db: AsyncSession,
+    db: Store,
     *,
     actor: str,
     action: str,
@@ -115,7 +116,7 @@ async def append(
     return row
 
 
-async def record_event(db: AsyncSession, event: CallEvent) -> CallEventRow:
+async def record_event(db: Store, event: CallEvent) -> CallEventRow:
     """Store a timeline event (redacted)."""
     row = CallEventRow(
         id=event.id,

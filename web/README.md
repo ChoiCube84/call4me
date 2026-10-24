@@ -67,3 +67,10 @@ node scripts/make-icons.mjs   # regenerate the PWA icons in public/
   reaches the user when the app is closed. Until then, keep the app open during a call.
 - Offline shell (service worker cache) and a reconnect sound-free status in the home-screen
   icon badge.
+
+## Convex live updates
+
+Set `NEXT_PUBLIC_CONVEX_URL` at build time to subscribe to Convex replay instead of
+the worker WebSocket. Call controls and private answers still use the Python API.
+See [Convex setup](../docs/convex-migration.md) for matching credentials, deployment,
+retention, and fallback behavior. Leave the URL empty for existing installations.

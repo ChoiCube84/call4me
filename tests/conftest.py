@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 
 # Tests never call real services, whatever .env says (it may hold real keys).
 os.environ["USE_MOCKS"] = "true"
+os.environ["STORAGE_BACKEND"] = "sql"
 os.environ["API_TOKEN"] = ""  # auth is tested on its own (tests/test_auth.py)
 
 import pytest

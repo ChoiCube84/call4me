@@ -591,10 +591,10 @@ class LiveCall:
 
     async def _save_session(self) -> None:
         from backend.db.models import CallSessionRow
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
 
         s = self.session
-        async with sessionmaker()() as db:
+        async with open_store() as db:
             row = await db.get(CallSessionRow, s.id)
             if row is None:
                 return
@@ -614,10 +614,10 @@ class LiveCall:
             await db.commit()
 
     async def _record_event(self, kind: str, detail: dict[str, Any]) -> None:
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
 
         try:
-            async with sessionmaker()() as db:
+            async with open_store() as db:
                 await audit.record_event(
                     db,
                     CallEvent(

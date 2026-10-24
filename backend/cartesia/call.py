@@ -432,11 +432,11 @@ class CartesiaCall:
 
     async def _save_session(self) -> None:
         from backend.db.models import CallSessionRow
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
 
         s = self.session
         try:
-            async with sessionmaker()() as db:
+            async with open_store() as db:
                 row = await db.get(CallSessionRow, s.id)
                 if row is None:
                     return

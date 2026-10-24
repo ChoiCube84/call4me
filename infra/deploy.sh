@@ -64,6 +64,16 @@ else
 fi
 # Never let a local dev flag leak into prod.
 export USE_MOCKS=false
+export STORAGE_BACKEND="${STORAGE_BACKEND:-sql}"
+FRONTEND_CONVEX_URL=""
+if [[ "$STORAGE_BACKEND" == "convex" ]]; then
+  [[ -n "${CONVEX_URL:-}" && -n "${CONVEX_BACKEND_TOKEN:-}" ]] || {
+    echo "Convex requires CONVEX_URL and CONVEX_BACKEND_TOKEN in $ENV_FILE." >&2; exit 1;
+  }
+  FRONTEND_CONVEX_URL="$CONVEX_URL"
+elif [[ "$STORAGE_BACKEND" != "sql" ]]; then
+  echo "STORAGE_BACKEND must be sql or convex." >&2; exit 1
+fi
 
 # Subscriptions like Azure for Students restrict regions by policy: fail fast with
 # the allowed list instead of 10 minutes into the deployment.
@@ -80,8 +90,9 @@ fi
 # --------------------------------------------------------------------------- #
 # 2. Resource providers, resource group, who is deploying
 # --------------------------------------------------------------------------- #
-PROVIDERS=(Microsoft.App Microsoft.ContainerRegistry Microsoft.DBforPostgreSQL
+PROVIDERS=(Microsoft.App Microsoft.ContainerRegistry
   Microsoft.KeyVault Microsoft.OperationalInsights Microsoft.Insights Microsoft.ManagedIdentity)
+if [[ "$STORAGE_BACKEND" == "sql" ]]; then PROVIDERS+=(Microsoft.DBforPostgreSQL); fi
 for p in "${PROVIDERS[@]}"; do
   if [[ "$(az provider show -n "$p" --query registrationState -o tsv 2>/dev/null)" != "Registered" ]]; then
     log "Registering resource provider $p"
@@ -180,7 +191,11 @@ set_secret_from_env CARTESIA_API_KEY cartesia-api-key
 set_secret_from_env TYPESAFE_API_KEY typesafe-api-key
 set_secret_from_env ANTHROPIC_API_KEY anthropic-api-key
 set_secret_from_env AZURE_FOUNDRY_KEY azure-foundry-key
-set_secret_from_env POSTGRES_ADMIN_PASSWORD postgres-admin-password
+if [[ "$STORAGE_BACKEND" == "sql" ]]; then
+  set_secret_from_env POSTGRES_ADMIN_PASSWORD postgres-admin-password
+else
+  set_secret_from_env CONVEX_BACKEND_TOKEN convex-backend-token
+fi
 if [[ -n "${APNS_AUTH_KEY_PATH:-}" && -f "${APNS_AUTH_KEY_PATH}" ]]; then
   set_secret apns-auth-key "$APNS_AUTH_KEY_PATH"
 else
@@ -196,12 +211,12 @@ log "Building $IMAGE in ACR"
 # ACR Tasks are blocked on some free-credit subscriptions (Azure for Students):
 # fall back to a local Docker build for linux/amd64 (Container Apps' platform).
 if ! az acr build -r "$ACR_NAME" -t "call4me:$IMAGE_TAG" -t "call4me:latest" \
-  --only-show-errors -o none . ; then
+  --build-arg "NEXT_PUBLIC_CONVEX_URL=$FRONTEND_CONVEX_URL" --only-show-errors -o none . ; then
   command -v docker >/dev/null || { echo "az acr build failed and docker is not installed." >&2; exit 1; }
   log "az acr build unavailable; building locally with Docker"
   az acr login -n "$ACR_NAME" --only-show-errors
   docker buildx build --platform linux/amd64 -t "$IMAGE" -t "$ACR_LOGIN_SERVER/call4me:latest" \
-    --push .
+    --build-arg "NEXT_PUBLIC_CONVEX_URL=$FRONTEND_CONVEX_URL" --push .
 fi
 
 log "Deploying app image"

@@ -5,6 +5,7 @@
 // rebuilds it; nothing has to be de-duplicated.
 
 import { useEffect, useReducer, useRef, useState } from "react";
+import { CONVEX_URL, subscribeToCall } from "./convex-live";
 import { type CallState, TERMINAL_STATES, parseTime, requestToken, wsUrl } from "./api";
 
 export type Speaker = "remote" | "agent" | "user";
@@ -180,6 +181,24 @@ export function useLiveCall(callId: string | null): LiveConnection {
 
   useEffect(() => {
     if (!callId) return;
+    if (CONVEX_URL) {
+      let initialized = false;
+      const stop = subscribeToCall(callId, msg => dispatch({ kind: "msg", msg }),
+        (connected, reconnecting) => {
+          if (connected && !initialized) {
+            dispatch({ kind: "reset" });
+            setDismissed(null);
+            initialized = true;
+          }
+          setConnected(connected);
+          setReconnecting(reconnecting);
+        });
+      return () => {
+        stop();
+        setConnected(false);
+        setReconnecting(false);
+      };
+    }
     let stopped = false;
     let socket: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;

@@ -4,6 +4,14 @@ This file gives Claude Code the full context for this repo. Read it before every
 
 ---
 
+## Convex migration branch
+
+Read `docs/convex-migration.md` for the storage path added in this branch.
+`backend/db/store.py` selects SQL or Convex. Business logic uses `open_store()`;
+keep raw SQL queries in the SQL adapter. Python still owns long-running calls and
+private answers. Convex stores redacted records and bounded live replay. The
+historical architecture below describes the SQL/default deployment.
+
 ## 1. What we're building
 
 **call4me** is an iPhone app plus a voice agent that makes a customer service phone call for the user, start to finish. It navigates the phone menu, waits on hold, talks to the human rep to reach the user's goal, and pulls the user in only when it needs something only they know (order number, PIN, a decision).

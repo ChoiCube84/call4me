@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from backend.contracts import DecisionClient, utcnow
+from backend.contracts import DecisionClient
 from backend.engine import jev_checks
 
 log = logging.getLogger(__name__)
@@ -128,37 +128,16 @@ class MemoryMenuPathStore:
 
 class DbMenuPathStore:
     async def load(self, company: str) -> list[str] | None:
-        from sqlalchemy import select
+        from backend.db.store import open_store
 
-        from backend.db.models import MenuPathRow
-        from backend.db.session import sessionmaker
-
-        async with sessionmaker()() as db:
-            row = await db.scalar(
-                select(MenuPathRow)
-                .where(MenuPathRow.company == company)
-                .order_by(MenuPathRow.success_count.desc(), MenuPathRow.last_used_at.desc())
-                .limit(1)
-            )
-            return list(row.steps_json) if row else None
+        async with open_store() as db:
+            return await db.menu(company)
 
     async def save_success(self, company: str, steps: list[str]) -> None:
-        from sqlalchemy import select
+        from backend.db.store import open_store
 
-        from backend.db.models import MenuPathRow
-        from backend.db.session import sessionmaker
-
-        async with sessionmaker()() as db:
-            rows = (
-                await db.scalars(select(MenuPathRow).where(MenuPathRow.company == company))
-            ).all()
-            row = next((r for r in rows if list(r.steps_json) == steps), None)
-            if row is None:
-                row = MenuPathRow(company=company, steps_json=list(steps), success_count=0)
-                db.add(row)
-            row.success_count = (row.success_count or 0) + 1
-            row.last_used_at = utcnow()
-            await db.commit()
+        async with open_store() as db:
+            await db.save_menu(company, steps)
 
 
 # --------------------------------------------------------------------------- #

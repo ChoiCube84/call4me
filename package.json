@@ -1,0 +1,13 @@
+{
+  "name": "call4me-convex",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "convex:dev": "convex dev",
+    "convex:deploy": "convex deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": { "convex": "^1.48.0" },
+  "devDependencies": { "typescript": "^5.9.3", "vitest": "^4.0.0", "convex-test": "^0.0.41", "@types/node": "^22.0.0" }
+}

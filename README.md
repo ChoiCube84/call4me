@@ -16,7 +16,7 @@ Judges view (/dashboard/)                                   ├─ serves the we
                                                             ├─ Call state engine ── Jev (TypeSafe) decisions
                                                             ├─ Claude: conversation, greeting, summaries
                                                             ├─ Guard: disclosure, privacy, limits (in code)
-                                                            ├─ PostgreSQL · Key Vault · Application Insights
+                                                            ├─ Convex (or PostgreSQL) · Key Vault · Application Insights
                                                             ▼
                                    Cartesia: voice agent that dials the company (TELEPHONY=cartesia)
                                    or our own pipeline + fake line (TELEPHONY=phone)
@@ -43,6 +43,16 @@ the limits, and the no-SSN rule are in its instructions, and offers go through o
 `check_offer` tool. Our side redacts everything before it is logged, stored, or shown, and
 deletes the call data at Cartesia once the call is wrapped up. The guard still can't block
 a sentence before Cartesia's agent says it.
+
+## Convex migration
+
+The `codex/convex-migration` branch supports Convex for call records, questions,
+audit logs, devices, saved menus, and reactive live captions. Python remains the
+single call worker; private answers are delivered in memory only. Existing SQL
+installations keep working until `STORAGE_BACKEND=convex` is selected.
+
+See [setup, tests, SQL data copy, and teammate handoff](docs/convex-migration.md).
+Each teammate can connect their own Convex deployment without changing source.
 
 ## Run it locally
 

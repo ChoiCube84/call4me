@@ -54,7 +54,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 /* ---------- layout ---------- */
 .layout { display: grid; grid-template-columns: 340px 1fr; gap: 1rem; padding: 1rem 1.2rem; }
 .wide { padding: 0 1.2rem 1rem; display: grid; gap: 1rem; }
-@media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; }
 .side { display: flex; flex-direction: column; gap: 1rem; }
@@ -218,3 +218,39 @@ button.ghost { background: transparent; }
 .pass { color: var(--ok); font-weight: 800; }
 .fail { color: var(--deny); font-weight: 800; }
 mark.redacted { background: var(--user); color: #000; font-weight: 800; padding: 0 .2rem; border-radius: 3px; }
+
+/* ---------- start-call form ---------- */
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: -.2rem 0 .7rem; }
+.chip {
+  padding: .3rem .7rem; font-size: .85rem; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+}
+.chip.add { color: var(--accent); }
+.hint { font-size: .8rem; color: var(--muted); margin: .2rem 0 .6rem; }
+.warn-text { color: var(--warn); }
+fieldset.info { border: 1px solid var(--line); border-radius: var(--radius); padding: .6rem .7rem .2rem; margin: 0 0 .8rem; }
+fieldset.info legend { font-size: .85rem; color: var(--muted); padding: 0 .3rem; }
+.info-row { display: grid; grid-template-columns: 1fr 1.3fr auto; gap: .4rem; margin-bottom: .5rem; }
+.info-row input { margin: 0; }
+.info-row .secret { -webkit-text-security: disc; }
+.info-row .secret:focus { -webkit-text-security: none; }
+.info-row button { padding: .2rem .55rem; }
+details.more { margin: 0 0 .9rem; }
+details.more summary { cursor: pointer; color: var(--muted); font-size: .9rem; margin-bottom: .6rem; }
+button.block { width: 100%; padding: .75rem; font-size: 1.05rem; font-weight: 600; }
+
+/* ---------- phones ---------- */
+.side { min-width: 0; }
+input, textarea { max-width: 100%; }
+@media (max-width: 600px) {
+  :root { font-size: 16px; }
+  .layout { padding: .6rem; gap: .6rem; }
+  .wide { padding: 0 .6rem .6rem; }
+  .topbar { flex-wrap: wrap; gap: .4rem .8rem; }
+  .topbar nav { gap: .7rem; font-size: .9rem; }
+  .banner { flex-wrap: wrap; gap: .5rem; }
+  .banner-state { font-size: 1.6rem; }
+  .cap { grid-template-columns: 4rem 1fr; font-size: 1.15rem; gap: .5rem; }
+  .info-row { grid-template-columns: 1fr 1fr auto; }
+  .stat { min-width: 90px; }
+}

@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -20,12 +21,15 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import calls
+from backend.agent import guard
 from backend.audit import log as audit
+from backend.auth import TokenAuthMiddleware
+from backend.cartesia.routes import router as cartesia_router
 from backend.config import get_settings
 from backend.contracts import (
     CallEvent,
@@ -48,41 +52,53 @@ from backend.db.session import get_db, init_db
 from backend.notify.apns import close_notifier
 from backend.notify.live import answers, hub
 from backend.telemetry import setup_telemetry
-from backend.telephony import media_ws
-from backend.telephony.routes import router as twilio_router
-from backend.telephony.signature import verify_twilio_request
-from backend.telephony.twilio_client import handle_status_form
-from fakeline.app import app as fakeline_app
+from backend.telephony.phone_client import router as phone_router
 
 log = logging.getLogger("call4me")
 
 Db = Annotated[AsyncSession, Depends(get_db)]
-TwilioForm = Annotated[dict[str, str], Depends(verify_twilio_request)]
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = REPO_ROOT / "dashboard"
+WEB_DIR = REPO_ROOT / "web" / "out"
 EVAL_RESULTS_DIR = REPO_ROOT / "evals" / "results"
+
+
+async def _sync_cartesia() -> None:
+    """Create/update the Cartesia agent, tools, webhook, and number to match this code
+    and PUBLIC_BASE_URL. A failure is logged; the first call retries it."""
+    from backend.cartesia import setup as cartesia_setup
+
+    try:
+        await cartesia_setup.ensure(get_settings())
+    except Exception as e:  # noqa: BLE001 - the server still serves; calls report the reason
+        log.warning("Cartesia setup not ready: %s", e)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await init_db()
-    callbacks = asyncio.create_task(calls.watch_incoming_callbacks())
+    sync = None
+    if get_settings().telephony_mode == "cartesia" and app.state.start_calls:
+        sync = asyncio.create_task(_sync_cartesia())
     yield
-    callbacks.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await callbacks
+    if sync is not None:
+        sync.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sync
     await close_notifier()
 
 
 app = FastAPI(title="call4me", lifespan=lifespan)
+app.add_middleware(TokenAuthMiddleware)  # no-op unless API_TOKEN is set
 setup_telemetry(app)  # no-op without APPLICATIONINSIGHTS_CONNECTION_STRING
 # Tests turn this off to exercise the API without running a call pipeline.
 app.state.start_calls = True
-app.include_router(twilio_router)
-# The fake support line, webhook <PUBLIC_BASE_URL>/fakeline/voice (CLAUDE.md section 13).
-app.mount("/fakeline", fakeline_app)
+# Cartesia calls: its event webhook and our webhook tools (TELEPHONY=cartesia).
+app.include_router(cartesia_router)
+# Backup demo with our own pipeline (TELEPHONY=phone): the page at /phone is the rep.
+app.include_router(phone_router)
 
 
 # --------------------------------------------------------------------------- #
@@ -90,13 +106,46 @@ app.mount("/fakeline", fakeline_app)
 # --------------------------------------------------------------------------- #
 
 
+class KnownInfoIn(BaseModel):
+    label: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def _not_high_sensitivity(self) -> KnownInfoIn:
+        # Rule 4: these are typed to the rep by the user during takeover, never relayed.
+        if guard.looks_high_sensitivity(self.value, self.label) or re.search(
+            r"password|passcode for|social security|\bssn\b", self.label, re.I
+        ):
+            raise ValueError(
+                f"{self.label}: don't add full card numbers, SSNs or passwords. "
+                "If the rep needs one, you'll type it to them yourself."
+            )
+        return self
+
+
 class StartCallIn(BaseModel):
     user_id: str = "demo-user"
-    company: str
-    phone_number: str
+    company: str = Field(min_length=1)
+    phone_number: str = Field(min_length=1)
+
+    @field_validator("phone_number")
+    @classmethod
+    def _e164(cls, v: str) -> str:
+        """US numbers in any common form -> E.164 (+14155551234), which Cartesia dials."""
+        digits = re.sub(r"\D", "", v)
+        if v.strip().startswith("+") and 8 <= len(digits) <= 15:
+            return "+" + digits
+        if len(digits) == 10:
+            return "+1" + digits
+        if len(digits) == 11 and digits.startswith("1"):
+            return "+" + digits
+        raise ValueError("use a US phone number like (415) 555-1234 or +14155551234")
+
     goal: str = Field(min_length=1)
     limits: CallLimits = Field(default_factory=CallLimits)
     disclosure_text: str = Field(min_length=1)
+    # Order number, email on the account, ... Used during this call only; never stored.
+    known_info: list[KnownInfoIn] = Field(default_factory=list, max_length=10)
 
 
 class EventOut(BaseModel):
@@ -196,7 +245,8 @@ async def health() -> dict[str, str]:
 
 @app.post("/calls", response_model=CallSession, status_code=201)
 async def start_call(body: StartCallIn, db: Db) -> CallSession:
-    session = CallSession(**body.model_dump())
+    session = CallSession(**body.model_dump(exclude={"known_info"}))
+    known = {i.label.strip(): i.value.strip() for i in body.known_info}
     db.add(
         CallSessionRow(
             id=session.id,
@@ -217,7 +267,8 @@ async def start_call(body: StartCallIn, db: Db) -> CallSession:
         action="call.start",
         subject=session.id,
         reason="user started a call",
-        diff={"company": session.company, "goal": session.goal},
+        # Labels only: the values exist in memory for this call and nowhere else.
+        diff={"company": session.company, "goal": session.goal, "known_info": list(known)},
     )
     await audit.record_event(
         db, CallEvent(session_id=session.id, kind="transition", to_state=CallState.DIALING)
@@ -225,7 +276,7 @@ async def start_call(body: StartCallIn, db: Db) -> CallSession:
     await db.commit()
     if app.state.start_calls:
         # Dialing takes seconds; the app follows progress on WS /calls/{id}/live.
-        _background(calls.start_call(session))
+        _background(calls.start_call(session, known_info=known))
     return session
 
 
@@ -291,7 +342,7 @@ async def call_audit(call_id: str, db: Db) -> list[AuditOut]:
 @app.websocket("/calls/{call_id}/live")
 async def live(websocket: WebSocket, call_id: str) -> None:
     await websocket.accept()
-    q = hub.subscribe(call_id)
+    q = hub.subscribe(call_id, replay=True)  # a reconnecting client rebuilds its screen
     try:
         while True:
             msg = await q.get()
@@ -354,7 +405,10 @@ async def continue_hold(call_id: str, body: HoldIn, db: Db) -> Accepted:
 async def type_to_talk(call_id: str, body: TypeIn, db: Db) -> Accepted:
     row = await _get_session_row(db, call_id)
     live = calls.get_call(call_id)
-    if live is not None and live.session.state != CallState.TAKEOVER:
+    # Our pipeline speaks typed text itself during takeover; a Cartesia agent says
+    # the message for the user on its next turn, so it needs no takeover.
+    relayed = getattr(live, "relays_messages", False)
+    if live is not None and not relayed and live.session.state != CallState.TAKEOVER:
         raise HTTPException(409, "take over the call before typing")
     # The user typed this themselves; it may hold private info, so log only that it happened.
     await audit.append(
@@ -385,6 +439,14 @@ async def answer_request(request_id: str, body: AnswerIn, db: Db) -> Accepted:
 
     req.status = UserRequestStatus.ANSWERED
     req.answered_at = utcnow()
+    # Closes the question on every screen (and in the replay a reconnecting phone gets).
+    hub.publish(
+        LiveMessage(
+            type="event",
+            session_id=req.session_id,
+            data={"kind": "ask_user_answered", "request_id": request_id},
+        )
+    )
     await audit.append(
         db,
         actor="user",
@@ -397,38 +459,16 @@ async def answer_request(request_id: str, body: AnswerIn, db: Db) -> Accepted:
 
 
 # --------------------------------------------------------------------------- #
-# Twilio
-# --------------------------------------------------------------------------- #
-
-
-@app.post("/twilio/status", response_model=Accepted)
-async def twilio_status(form: TwilioForm, db: Db) -> Accepted:
-    # Signature checked by verify_twilio_request; the update reaches the call's engine.
-    update = handle_status_form(form)
-    await audit.append(
-        db,
-        actor="twilio",
-        action="twilio.status",
-        subject=update.session_id if update else str(form.get("CallSid", "")),
-        evidence={k: str(form[k]) for k in ("CallStatus", "CallDuration") if k in form},
-    )
-    await db.commit()
-    return Accepted()
-
-
-@app.websocket("/media")
-async def media(websocket: WebSocket) -> None:
-    await media_ws.handle(websocket)
-
-
-# --------------------------------------------------------------------------- #
 # Directory
 # --------------------------------------------------------------------------- #
 
 
 @app.get("/companies", response_model=list[companies.Company])
 async def list_companies(q: str = "") -> list[companies.Company]:
-    return companies.search(q, get_settings().twilio_fakeline_number)
+    # Our pipeline plays the fake line at a placeholder number. A Cartesia agent really
+    # dials, so leave the number for the user to fill in (e.g. the teammate playing the rep).
+    cartesia = get_settings().telephony_mode == "cartesia"
+    return companies.search(q, "" if cartesia else companies.FAKELINE_PLACEHOLDER_NUMBER)
 
 
 # --------------------------------------------------------------------------- #
@@ -463,13 +503,14 @@ async def metrics() -> dict[str, Any]:
     return json.loads(reports[-1].read_text())
 
 
-@app.get("/", include_in_schema=False)
-async def root() -> RedirectResponse:
-    return RedirectResponse("/dashboard/")
+@app.get("/phone", include_in_schema=False)
+async def phone_page() -> RedirectResponse:
+    return RedirectResponse("/console/phone.html")
 
 
+# The plain-JS console (backup dashboard) and the phone-mode rep page.
 if DASHBOARD_DIR.is_dir():
-    app.mount("/dashboard", StaticFiles(directory=DASHBOARD_DIR, html=True), name="dashboard")
+    app.mount("/console", StaticFiles(directory=DASHBOARD_DIR, html=True), name="console")
 
 
 _bg: set[asyncio.Task[Any]] = set()
@@ -480,3 +521,14 @@ def _background(coro: Any) -> None:
     task = asyncio.ensure_future(coro)
     _bg.add(task)
     task.add_done_callback(_bg.discard)
+
+
+# The mobile web app (web/, a Next.js static export) at the site root. Mounted last so
+# every API route above wins; without a build, / falls back to the console.
+if WEB_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+else:
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/console/")

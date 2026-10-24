@@ -33,7 +33,11 @@ class EchoGate:
         text_window_s: float = 6.0,
         similarity: float = 0.8,
         clock: Callable[[], float] = time.monotonic,
+        gate_audio: bool = True,
     ) -> None:
+        # gate_audio=False: the line already cancels echo (the browser phone), so let
+        # the rep be heard over our audio; the text filter still runs.
+        self.gate_audio = gate_audio
         self.tail_s = tail_s
         self.text_window_s = text_window_s
         self.similarity = similarity
@@ -54,11 +58,16 @@ class EchoGate:
         self._play_until = min(self._play_until, self._clock() - self.tail_s)
 
     @property
+    def play_until(self) -> float:
+        """When our queued audio finishes playing (clock time)."""
+        return self._play_until
+
+    @property
     def agent_speaking(self) -> bool:
         return self._clock() < self._play_until
 
     def suppress_audio(self) -> bool:
-        return self._clock() < self._play_until + self.tail_s
+        return self.gate_audio and self._clock() < self._play_until + self.tail_s
 
     def is_echo(self, transcript: str) -> bool:
         heard = _norm(transcript)

@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from typing import Any
 
 from backend.config import get_settings
@@ -31,9 +31,11 @@ log = logging.getLogger(__name__)
 STATE_CHECK = "state_check"
 MENU_CHOICE = "menu_choice"
 HUMAN_CONFIRMATION = "human_confirmation"
+LIVE_PERSON = "live_person"
 
 STATE_OPTIONS: list[str] = [label.value for label in StateCheckLabel]
 HUMAN_OPTIONS: list[str] = ["human", "recording"]
+LIVE_OPTIONS: list[str] = ["live_person", "automated"]
 
 # Probability is scaled by this when we fall back to heuristics after a Jev
 # failure, so fallback answers never clear the high-confidence bars on their own.
@@ -43,7 +45,8 @@ _INSTRUCTIONS: dict[str, str] = {
     STATE_CHECK: (
         "You are monitoring an automated customer-service phone call from the caller's side. "
         "Given the last few seconds of what the company side said and the audio label, "
-        "what is happening on the line right now?"
+        "what is happening on the line right now? Judge mainly by latest_utterance: the "
+        "earlier transcript may still hold the end of a recording that came before it."
     ),
     MENU_CHOICE: (
         "A phone menu just listed options. Which option best moves the caller toward their "
@@ -52,6 +55,16 @@ _INSTRUCTIONS: dict[str, str] = {
     HUMAN_CONFIRMATION: (
         "The caller's assistant just greeted the other side. Is this reply a live person "
         "responding naturally to the greeting, or a recording that ignores it?"
+    ),
+    # Asked on every new utterance while waiting. A yes/no question separates a rep's
+    # "Hello? Are you there?" from a hold announcement far better than the 8-way
+    # state check, which tends to follow the audio label (hold music) instead.
+    LIVE_PERSON: (
+        "We are on hold with a company's phone line. Did a live person just start talking "
+        "to us, or is the latest speech still part of the automated system (recorded "
+        "announcement, menu, hold message)? Live people speak informally and directly to "
+        "the caller: greetings, their name, 'how can I help', 'are you there?', questions "
+        "about what we want."
     ),
 }
 
@@ -71,12 +84,15 @@ _STATE_DESCRIPTIONS: dict[str, str] = {
 # Heuristics (shared by the mock and the fallback path)
 # --------------------------------------------------------------------------- #
 
+CALLBACK_RE = re.compile(
+    r"(call you back|callback|call back|return your call|keep your place in line)"
+)
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("call_ended", re.compile(r"\b(goodbye|good bye|disconnect(ed|ing)?|hang(ing)? up)\b")),
     ("voicemail", re.compile(r"(leave (a|your) message|after the (tone|beep)|voicemail)")),
     (
         "callback_offer",
-        re.compile(r"(call you back|callback|call back|return your call|keep your place in line)"),
+        CALLBACK_RE,
     ),
     (
         "human",
@@ -94,8 +110,9 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         "recorded_message",
         re.compile(
             r"(your call is important|please (continue to )?hold|please stay on the line|"
-            r"all of our (agents|representatives)|wait time|calls? (may be|are) recorded|"
-            r"transfer(ring)? you|next available)"
+            r"all of our (agents|representatives|associates)|wait time|"
+            r"calls? (may be|are) (recorded|monitored)|monitored for quality|"
+            r"thank you for calling|menu options have changed|transfer(ring)? you|next available)"
         ),
     ),
 ]
@@ -112,8 +129,9 @@ def heuristic_state(context: dict[str, Any]) -> tuple[str, float]:
         return "hold_music", max(0.6, audio_p)
     if label == AudioLabelKind.SILENCE or not text:
         return "silence", max(0.6, audio_p)
-    # Unlabelled speech: a person is more likely than not, but not confidently.
-    return "human", 0.55
+    # Unlabelled speech: could be a person, but too weak to act on, even twice in a row
+    # (below EngineConfig.human_streak_threshold). Clear cues are matched above.
+    return "human", 0.4
 
 
 _WORD = re.compile(r"[a-z]+")
@@ -121,26 +139,29 @@ _STOP = frozenset({"the", "a", "an", "to", "for", "my", "of", "and", "or", "on",
 REP_WORDS = frozenset({"agent", "representative", "operator", "person", "someone", "associate"})
 
 
+def _stem(w: str) -> str:
+    return w[:-1] if w.endswith("s") and len(w) > 3 else w
+
+
 def words(text: str) -> set[str]:
-    out = set()
-    for w in _WORD.findall(text.lower()):
-        if w in _STOP:
-            continue
-        out.add(w[:-1] if w.endswith("s") and len(w) > 3 else w)
-    return out
+    return {_stem(w) for w in _WORD.findall(text.lower()) if w not in _STOP}
 
 
 def heuristic_menu_choice(options: list[str], context: dict[str, Any]) -> tuple[str, float]:
     """Pick the option whose label overlaps the goal most; else a rep option."""
     labels: dict[str, str] = context.get("menu_options", {}) or {}
     goal = words(str(context.get("goal", "")))
-    best, best_score = None, 0
+    # A goal word the whole menu repeats ("Returns and refunds. ... status of a refund")
+    # says little about which option fits; count it for less.
+    heard = Counter(_stem(w) for w in _WORD.findall(str(context.get("transcript", "")).lower()))
+    best, best_score = None, 0.0
     for key in options:
-        score = len(goal & words(labels.get(key, "")))
+        shared = goal & words(labels.get(key, ""))
+        score = sum(1 / max(1, heard[w]) for w in shared)
         if score > best_score:
             best, best_score = key, score
     if best is not None:
-        return best, min(0.95, 0.6 + 0.15 * best_score)
+        return best, min(0.95, 0.6 + 0.15 * max(1.0, best_score))
     for key in options:
         if words(labels.get(key, "")) & REP_WORDS:
             return key, 0.6
@@ -175,6 +196,9 @@ def heuristic(question: str, options: list[str], context: dict[str, Any]) -> tup
         choice, p = heuristic_menu_choice(options, context)
     elif question == HUMAN_CONFIRMATION:
         choice, p = heuristic_human(context)
+    elif question == LIVE_PERSON:
+        # No keyword rule is reliable here; the state check's heuristic covers fallback.
+        choice, p = "automated", 0.6
     else:
         choice, p = options[0], 1.0 / max(1, len(options))
     if choice not in options:
@@ -251,11 +275,14 @@ class JevDecisionClient(DecisionClient):
             },
         )
         answer = response.choices[question]
+        probabilities = {k: float(v) for k, v in answer.probabilities.items()}
         return JevDecision(
             question=question,
             choice=answer.choice,
-            probability=float(answer.confidence),
-            alternatives=dict(answer.probabilities),
+            # The chosen option's probability. `confidence` is a separate certainty score
+            # (often far lower: 0.36 for a 0.68 choice), not what our thresholds mean.
+            probability=probabilities.get(answer.choice, float(answer.confidence)),
+            alternatives=probabilities,
         )
 
     async def aclose(self) -> None:
@@ -304,8 +331,10 @@ async def classify_state(
     current_state: CallState,
     silence_s: float = 0.0,
     timeout_s: float = 2.0,
+    latest: str = "",
 ) -> JevDecision:
     context = {
+        "latest_utterance": latest or transcript,
         "transcript": transcript,
         "audio_label": audio_label.label if audio_label else None,
         "audio_confidence": audio_label.confidence if audio_label else None,
@@ -313,7 +342,12 @@ async def classify_state(
         "silence_seconds": round(silence_s, 1),
         "option_descriptions": _STATE_DESCRIPTIONS,
     }
-    return await _choose_with_fallback(client, STATE_CHECK, STATE_OPTIONS, context, timeout_s)
+    d = await _choose_with_fallback(client, STATE_CHECK, STATE_OPTIONS, context, timeout_s)
+    if d.choice == "menu" and CALLBACK_RE.search((latest or transcript).lower()):
+        # "To get a callback, press 1" is a menu too; pressing through it as one
+        # would accept the callback by accident, so it goes to the callback handling.
+        return d.model_copy(update={"choice": "callback_offer"})
+    return d
 
 
 async def choose_menu_option(
@@ -333,6 +367,24 @@ async def choose_menu_option(
         "option_descriptions": menu_options,
     }
     return await _choose_with_fallback(client, MENU_CHOICE, options, context, timeout_s)
+
+
+async def live_person(
+    client: DecisionClient,
+    *,
+    latest: str,
+    previous: str,
+    timeout_s: float = 2.0,
+) -> JevDecision:
+    context = {
+        "previous": previous,
+        "latest_utterance": latest,
+        "option_descriptions": {
+            "live_person": "a live person is speaking directly to the caller",
+            "automated": "a recording, menu, or hold announcement",
+        },
+    }
+    return await _choose_with_fallback(client, LIVE_PERSON, LIVE_OPTIONS, context, timeout_s)
 
 
 async def confirm_human(

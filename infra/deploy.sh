@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy call4me to Azure Container Apps. See infra/README.md.
 #
-#   RESOURCE_GROUP=call4me-rg LOCATION=westus2 ./infra/deploy.sh
+#   ./infra/deploy.sh                      # call4me-rg in northcentralus
+#   RESOURCE_GROUP=x LOCATION=swedencentral ./infra/deploy.sh
 #
 # Reads settings and secrets from .env (ENV_FILE to override). Secret values
 # are never echoed or passed on the command line: they reach Key Vault via
@@ -12,10 +13,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 RESOURCE_GROUP="${RESOURCE_GROUP:-call4me-rg}"
-LOCATION="${LOCATION:-westus2}"
+# Azure for Students only allows a few regions; northcentralus is the closest to the US.
+LOCATION="${LOCATION:-northcentralus}"
 ENV_FILE="${ENV_FILE:-.env}"
 export APP_NAME="${APP_NAME:-call4me}"
-IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
+IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo build)}"
+# Uncommitted changes get their own tag, so each build is a new revision.
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then IMAGE_TAG="$IMAGE_TAG-$(date +%Y%m%d%H%M%S)"; fi
 PLACEHOLDER_IMAGE="mcr.microsoft.com/k8se/quickstart:latest"
 
 log() { printf '==> %s\n' "$*" >&2; }
@@ -61,9 +65,30 @@ fi
 # Never let a local dev flag leak into prod.
 export USE_MOCKS=false
 
+# Subscriptions like Azure for Students restrict regions by policy: fail fast with
+# the allowed list instead of 10 minutes into the deployment.
+ALLOWED="$(az policy assignment list --query \
+  "[?parameters.listOfAllowedLocations].parameters.listOfAllowedLocations.value[]" \
+  -o tsv 2>/dev/null | tr '\t' '\n' | sort -u || true)"
+if [[ -n "$ALLOWED" ]] && ! grep -qx "$LOCATION" <<<"$ALLOWED"; then
+  echo "Region $LOCATION is not allowed on this subscription. Allowed:" >&2
+  echo "$ALLOWED" | sed 's/^/  /' >&2
+  echo "Re-run with LOCATION=<one of these>." >&2
+  exit 1
+fi
+
 # --------------------------------------------------------------------------- #
-# 2. Resource group + who is deploying
+# 2. Resource providers, resource group, who is deploying
 # --------------------------------------------------------------------------- #
+PROVIDERS=(Microsoft.App Microsoft.ContainerRegistry Microsoft.DBforPostgreSQL
+  Microsoft.KeyVault Microsoft.OperationalInsights Microsoft.Insights Microsoft.ManagedIdentity)
+for p in "${PROVIDERS[@]}"; do
+  if [[ "$(az provider show -n "$p" --query registrationState -o tsv 2>/dev/null)" != "Registered" ]]; then
+    log "Registering resource provider $p"
+    az provider register -n "$p" --wait --only-show-errors -o none
+  fi
+done
+
 log "Resource group $RESOURCE_GROUP ($LOCATION)"
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION" --only-show-errors -o none
 
@@ -80,6 +105,17 @@ if [[ -z "${POSTGRES_ADMIN_PASSWORD:-}" ]]; then
   POSTGRES_ADMIN_PASSWORD="Pg1-$(openssl rand -hex 16)"
 fi
 export POSTGRES_ADMIN_PASSWORD
+
+# The access token the iOS app and dashboard send. Reused like the password, so
+# redeploys don't lock out installed apps.
+if [[ -z "${API_TOKEN:-}" && -n "$EXISTING_KV" ]]; then
+  API_TOKEN="$(az keyvault secret show --vault-name "$EXISTING_KV" \
+    --name api-token --query value -o tsv 2>/dev/null || true)"
+fi
+if [[ -z "${API_TOKEN:-}" ]]; then
+  API_TOKEN="$(openssl rand -hex 16)"
+fi
+export API_TOKEN
 
 deploy() {
   # $1 = image, $2 = target port
@@ -139,7 +175,7 @@ set_secret_from_env() {
 }
 
 log "Writing secrets to Key Vault $KV_NAME"
-set_secret_from_env TWILIO_AUTH_TOKEN twilio-auth-token
+set_secret_from_env API_TOKEN api-token
 set_secret_from_env CARTESIA_API_KEY cartesia-api-key
 set_secret_from_env TYPESAFE_API_KEY typesafe-api-key
 set_secret_from_env ANTHROPIC_API_KEY anthropic-api-key
@@ -157,25 +193,43 @@ fi
 # --------------------------------------------------------------------------- #
 IMAGE="$ACR_LOGIN_SERVER/call4me:$IMAGE_TAG"
 log "Building $IMAGE in ACR"
-az acr build -r "$ACR_NAME" -t "call4me:$IMAGE_TAG" -t "call4me:latest" \
-  --only-show-errors -o none .
+# ACR Tasks are blocked on some free-credit subscriptions (Azure for Students):
+# fall back to a local Docker build for linux/amd64 (Container Apps' platform).
+if ! az acr build -r "$ACR_NAME" -t "call4me:$IMAGE_TAG" -t "call4me:latest" \
+  --only-show-errors -o none . ; then
+  command -v docker >/dev/null || { echo "az acr build failed and docker is not installed." >&2; exit 1; }
+  log "az acr build unavailable; building locally with Docker"
+  az acr login -n "$ACR_NAME" --only-show-errors
+  docker buildx build --platform linux/amd64 -t "$IMAGE" -t "$ACR_LOGIN_SERVER/call4me:latest" \
+    --push .
+fi
 
 log "Deploying app image"
 OUTPUTS="$(deploy "$IMAGE" 8000)"
 APP_URL="$(output appUrl)"
 APP_FQDN="$(output appFqdn)"
 
+log "Waiting for $APP_URL/health"
+for _ in $(seq 1 30); do
+  curl -fsS "$APP_URL/health" >/dev/null 2>&1 && break
+  sleep 10
+done
+curl -fsS "$APP_URL/health" >/dev/null 2>&1 || log "  not healthy yet; check the logs (below)"
+
 cat <<EOF
 
 call4me is deployed.
 
-  App URL:        $APP_URL
-  Health check:   $APP_URL/health
+  Web app (phone):  $APP_URL/            (Share > Add to Home Screen)
+  Judges view:      $APP_URL/dashboard/
+  Console (backup): $APP_URL/console/
+  Health check:     $APP_URL/health
+  Calls placed:     TELEPHONY=${TELEPHONY:-cartesia}
 
-Configure Twilio (Console > Phone Numbers > ${TWILIO_AGENT_NUMBER:-your agent number}):
-  Voice webhook:      $APP_URL/twilio/voice
-  Status callback:    $APP_URL/twilio/status
-  Media Stream URL:   wss://$APP_FQDN/media
+Access code (the web app asks for it once):
+  az keyvault secret show --vault-name $KV_NAME --name api-token --query value -o tsv
 
-Point the iOS app's backend URL at: $APP_URL
+Logs (Log Analytics; 'az containerapp logs show' crashes on some CLI versions):
+  az monitor log-analytics query -w \$(az monitor log-analytics workspace show -g $RESOURCE_GROUP -n $APP_NAME-logs --query customerId -o tsv) \\
+    --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(30m) | project TimeGenerated, Log_s | order by TimeGenerated desc" -o tsv
 EOF

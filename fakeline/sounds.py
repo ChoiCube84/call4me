@@ -1,6 +1,6 @@
 """Synthesized audio for the fake line, so it needs no external media files.
 
-- `hold_music_pcm()`: a 10 s loop of soft chords (served as WAV to Twilio, and
+- `hold_music_pcm()`: a 10 s loop of soft chords (served as WAV, and
   replayed as mu-law frames by the mock line).
 - `speech_like_pcm(text)`: a voiced, syllable-modulated buzz sized to the text's
   length, standing in for a recorded prompt in the mock line. It is not real

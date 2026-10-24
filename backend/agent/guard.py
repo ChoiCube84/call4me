@@ -214,8 +214,10 @@ def _goal_permits(topic: str, session: CallSession) -> bool:
     return False
 
 
-def _declined_before(text: str, pos: int, window_words: int = 5) -> bool:
-    before = _DECLINE_IDIOMS.sub(" ", text[:pos])
+def _declined_before(text: str, pos: int, window_words: int = 8) -> bool:
+    # Look back within the same sentence only: "No. I'd like the upgrade" is not a decline.
+    sentence = re.split(r"[.!?;]", text[:pos])[-1]
+    before = _DECLINE_IDIOMS.sub(" ", sentence)
     words = before.split()[-window_words:]
     return bool(_DECLINE_WORD.search(" ".join(words)))
 
@@ -265,12 +267,17 @@ def limits_violation(text: str, session: CallSession, runtime: AgentRuntime | No
 
     # Spend: any agreement in a payment context above the spend limit.
     if agreeing:
-        combined = f"{context} {text}"
-        strong = _STRONG_PAY.search(combined)
-        weak = _WEAK_PAY.search(combined)
-        waiving = _WAIVE.search(combined) and not strong
+        # Declining the rep's offer means the "yes" is about our own request, not their price.
+        scope = text if declined else f"{context} {text}"
+        strong = _STRONG_PAY.search(scope)
+        weak = _WEAK_PAY.search(scope)
+        waiving = _WAIVE.search(scope) and not strong
         if (strong or weak) and not waiving:
-            amounts = _amounts(combined)
+            amounts = _amounts(scope)
+            if _WAIVE.search(session.goal):
+                # Amounts the goal wants removed ("the $40 late fee") are not payments.
+                goal_amounts = set(_amounts(session.goal))
+                amounts = [a for a in amounts if a not in goal_amounts]
             top = max(amounts) if amounts else None
             if top is None:
                 if session.limits.max_spend_usd <= 0 and strong:
@@ -393,9 +400,68 @@ def _check_digits(
     return GuardResult(allowed=True, action=action)
 
 
+# A rep's farewell, and the agent's wrap-up line (both ends of a mutual close).
+REP_FAREWELL = re.compile(
+    r"\b(good ?bye|bye|take care|have a (good|great|nice|wonderful) (day|one|night|evening|"
+    r"afternoon)|thanks? (you )?for calling)\b",
+    re.I,
+)
+AGENT_WRAP_UP = re.compile(
+    r"\b(anything else|that'?s all|that is all|all set|that will be all|good ?bye|bye|"
+    r"thank(s| you)( so much)? for (your|all your) help|have a (good|great|nice))\b",
+    re.I,
+)
+# The rep offering to close ("anything else?"): answering it with a wrap-up ends the call
+# for both sides, since reps often say goodbye and hang up in one breath.
+REP_CLOSING = re.compile(
+    r"\b(anything else|will that be all|is that all|is there anything more)\b", re.I
+)
+# Silence nudges before the call may end: the agent asks "are you still there?" on the
+# first two, so the third means both checks went unanswered.
+NOBODY_THERE_CHECKS = 3
+
+
+def _call_may_end(runtime: AgentRuntime) -> str | None:
+    """None if the call may end; else why not. Ending needs both sides done, or nobody there."""
+    if runtime.presence_checks >= NOBODY_THERE_CHECKS:
+        return None  # asked twice whether the rep is still there; no answer
+    recent = list(runtime.remote_history)[-2:]
+    rep_said_bye = any(REP_FAREWELL.search(t) for t in recent)
+    if runtime.takeover_suggested and not rep_said_bye:
+        return (
+            "you asked the user to take over and they haven't decided yet; keep the rep "
+            "on the line and wait for the user"
+        )
+    if rep_said_bye:
+        return None
+    if runtime.closing_at_turn is not None and runtime.rep_turns > runtime.closing_at_turn:
+        return None  # we wrapped up and the rep answered
+    if (
+        runtime.closing_at_turn == runtime.rep_turns
+        and not runtime.awaiting_reply
+        and recent
+        and REP_CLOSING.search(recent[-1])
+    ):
+        return None  # the rep asked "anything else?" and we wrapped up in reply
+    return (
+        "the call isn't finished for both sides yet. Wrap up first (read back the details "
+        "and ask if there's anything else, or thank them) and wait for the rep to answer "
+        "or say goodbye. If the rep has gone quiet, ask if they are still there"
+    )
+
+
 def _check_end_call(
     action: EndCallAction, session: CallSession, runtime: AgentRuntime | None
 ) -> GuardResult:
+    if runtime is not None and (why := _call_may_end(runtime)):
+        return _deny(why)
+    if runtime is not None and runtime.unseen_rep:
+        return _deny("the rep just said something new; read it before ending the call")
+    if runtime is not None and runtime.awaiting_reply:
+        return _deny(
+            "you asked the rep a question and they haven't answered yet; "
+            "wait for their reply before ending the call"
+        )
     ref = (action.reference_number or "").strip()
     if ref and runtime is not None:
         said = _norm(" ".join(runtime.spoken)).replace(" ", "")

@@ -11,11 +11,9 @@ param postgresAdminPassword = readEnvironmentVariable('POSTGRES_ADMIN_PASSWORD')
 param deployerPrincipalId = readEnvironmentVariable('DEPLOYER_PRINCIPAL_ID', '')
 
 // Non-secret settings.
-param twilioAccountSid = readEnvironmentVariable('TWILIO_ACCOUNT_SID', '')
-param twilioAgentNumber = readEnvironmentVariable('TWILIO_AGENT_NUMBER', '')
-param twilioFakelineNumber = readEnvironmentVariable('TWILIO_FAKELINE_NUMBER', '')
-param userVerifiedCallerId = readEnvironmentVariable('USER_VERIFIED_CALLER_ID', '')
+param telephony = readEnvironmentVariable('TELEPHONY', 'cartesia')
 param cartesiaVoiceId = readEnvironmentVariable('CARTESIA_VOICE_ID', '')
+param cartesiaAgentModel = readEnvironmentVariable('CARTESIA_AGENT_MODEL', 'claude-haiku-5.5')
 param azureFoundryEndpoint = readEnvironmentVariable('AZURE_FOUNDRY_ENDPOINT', '')
 param apnsKeyId = readEnvironmentVariable('APNS_KEY_ID', '')
 param apnsTeamId = readEnvironmentVariable('APNS_TEAM_ID', '')

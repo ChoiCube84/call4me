@@ -16,7 +16,8 @@ from typing import Any
 
 from backend.config import get_settings
 
-DEFAULT_MODEL = "claude-opus-5-5"
+# Sonnet: ~1.6 s per turn vs ~2.6 s for Opus, which left the agent a turn behind the rep.
+DEFAULT_MODEL = "claude-sonnet-5-5"
 # Phone turns are latency-critical (section 16). Opus 5.5 always thinks; effort is the dial.
 DEFAULT_EFFORT = "low"
 
@@ -149,6 +150,7 @@ class MockLLMClient(LLMClient):
         self.calls: list[dict[str, Any]] = []
         self._reference: str | None = None
         self._confirmed = False
+        self._wrapped_up = False
 
     async def respond(
         self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
@@ -157,7 +159,7 @@ class MockLLMClient(LLMClient):
         rep = _last_rep_text(messages)
         if rep is None:  # tool results came back: end this turn
             return LLMResponse(content=[{"type": "text", "text": "ok"}], text="ok")
-        calls = self.script.pop(0) if self.script else self._rules(rep)
+        calls = self.script.pop(0) if self.script else self._rules(rep, _known_labels(system))
         content: list[Any] = [
             {"type": "tool_use", "id": c.id, "name": c.name, "input": c.input} for c in calls
         ]
@@ -167,7 +169,7 @@ class MockLLMClient(LLMClient):
             stop_reason="tool_use" if calls else "end_turn",
         )
 
-    def _rules(self, rep: str) -> list[ToolCall]:
+    def _rules(self, rep: str, known: list[str] | None = None) -> list[ToolCall]:
         low = rep.lower()
         # Reps often spell references out ("A 7 X 2 9 1"); collapse the spaces.
         ref = re.search(
@@ -178,21 +180,25 @@ class MockLLMClient(LLMClient):
         if ref:
             self._reference = ref.group(1).replace(" ", "").upper()
             return [_tool("say", text=f"Just to confirm, the reference is {self._reference}?")]
-        if self._reference and re.search(
-            r"\b(yes|correct|that's right|right|goodbye|have a great day)\b", low
-        ):
-            return [
-                _tool("say", text="Thank you so much for your help today."),
-                _tool(
-                    "end_call", summary="The request was handled.", reference_number=self._reference
-                ),
-            ]
+        end = _tool(
+            "end_call", summary="The request was handled.", reference_number=self._reference
+        )
+        from backend.agent.guard import REP_FAREWELL  # lazy: guard imports agent modules
+
+        if self._wrapped_up or (self._reference and REP_FAREWELL.search(low)):
+            return [end]  # both sides are done
+        if self._reference and re.search(r"\b(yes|correct|that's right|right)\b", low):
+            # Wrap up and let the rep answer before hanging up.
+            self._wrapped_up = True
+            return [_tool("say", text="That's all I needed. Thank you so much for your help.")]
         if re.search(r"social security|card number|password", low):
             return [_tool("request_takeover", reason="The rep needs high-sensitivity info.")]
         if re.search(r"\b(pin|passcode|order number|account number|date of birth|zip code)\b", low):
             what = re.search(
                 r"\b(pin|passcode|order number|account number|date of birth|zip code)\b", low
             ).group(1)
+            if what in (known or []):
+                return [_tool("share_info", label=what)]
             return [
                 _tool(
                     "ask_user",
@@ -201,7 +207,7 @@ class MockLLMClient(LLMClient):
                     relay_template=f"Sure, the {what} is {{answer}}.",
                 )
             ]
-        if re.search(r"upgrade|premium|new plan|protection plan|add-on", low):
+        if re.search(r"upgrade|premium|prime|free trial|new plan|protection plan|add-on", low):
             return [_tool("say", text="No thank you, I'd just like help with my request today.")]
         if re.search(r"\bai\b|robot|real person", low) and re.search(r"don't|won't|can't", low):
             return [_tool("request_takeover", reason="The rep will not talk to an AI assistant.")]
@@ -209,6 +215,11 @@ class MockLLMClient(LLMClient):
 
     async def complete(self, system: str, prompt: str, max_tokens: int = 1024) -> str:
         return ""  # callers fall back to deterministic text
+
+
+def _known_labels(system: str) -> list[str]:
+    m = re.search(r"The user already gave you: (.+?)\. You cannot see", system)
+    return [x.strip().lower() for x in m.group(1).split(",")] if m else []
 
 
 def get_llm_client() -> LLMClient:

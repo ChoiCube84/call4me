@@ -28,10 +28,6 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>remote-notification</string>
-	</array>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
@@ -59,6 +55,8 @@
 		</dict>
 	</array>
 	<key>Call4meDefaultBackendURL</key>
-	<string>http://localhost:8000</string>
+	<string>$(CALL4ME_BACKEND_URL)</string>
+	<key>Call4meAccessToken</key>
+	<string>$(CALL4ME_API_TOKEN)</string>
 </dict>
 </plist>

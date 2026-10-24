@@ -1,16 +1,16 @@
-"""The fake support line's script: one source of truth for the TwiML app
-(`fakeline/app.py`) and the in-process mock line (`backend/telephony/mock_client.py`).
+"""The fake support line's script, played by the in-process mock line
+(`backend/telephony/mock_client.py`) for the browser fake phone and tests.
 
 Call flow::
 
     welcome -> main menu
       1 orders   -> recorded message -> hold queue
-      2 billing  -> billing menu
-                      1 balance -> recorded message -> billing menu
-                      2 fees    -> hold queue
-                      0 agent   -> hold queue
-                      9 back    -> main menu
-      0 agent    -> hold queue
+      2 refunds  -> returns and refunds menu
+                      1 refund status   -> recorded message -> refunds menu
+                      2 damaged/missing -> hold queue
+                      0 associate       -> hold queue
+                      9 back            -> main menu
+      0 associate -> hold queue
     hold queue: music for a random 30-120 s with periodic announcements, sometimes a
     callback offer (press 1), then a hand-off to a rep (a forwarded number, an
     external bot-rep URL, or the built-in scripted rep below).
@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 from backend.contracts import StateCheckLabel
 
-COMPANY = "Acme Home Services"
+COMPANY = "Amazon Customer Service"
 MAX_MENU_TRIES = 5  # silent/invalid menu attempts before the line hangs up
 MENU_TIMEOUT_S = 6
 
@@ -52,74 +52,80 @@ class RepLine:
 
 
 WELCOME = (
-    f"Thank you for calling {COMPANY}. Your call may be monitored for quality. "
+    "Thank you for calling Amazon customer service. Your call may be monitored for quality. "
     "Please listen carefully, as our menu options have changed."
 )
 
 NODES: dict[str, Menu | Message] = {
     "main": Menu(
         prompt=(
-            "For orders, press 1. For billing and payments, press 2. "
-            "To speak with an agent, press 0."
+            "For help with an order, press 1. For returns and refunds, press 2. "
+            "To speak with an associate, press 0."
         ),
-        options={"1": "orders", "2": "billing", "0": "queue"},
+        options={"1": "orders", "2": "refunds", "0": "queue"},
     ),
-    "billing": Menu(
+    "refunds": Menu(
         prompt=(
-            "Billing. To hear your balance, press 1. For questions about fees or charges, "
-            "press 2. To speak with an agent, press 0. To return to the main menu, press 9."
+            "Returns and refunds. To check the status of a refund, press 1. For a damaged or "
+            "missing item, press 2. To speak with an associate, press 0. To return to the main "
+            "menu, press 9."
         ),
-        options={"1": "balance", "2": "queue", "0": "queue", "9": "main"},
+        options={"1": "refund_status", "2": "queue", "0": "queue", "9": "main"},
     ),
     "orders": Message(
         text=(
-            "You can track any order online at acme dot example slash orders. "
-            "Please hold for the next available orders specialist."
+            "You can track any order in the Your Orders section of the Amazon app. "
+            "Please hold for the next available associate."
         ),
         next="queue",
     ),
-    "balance": Message(
+    "refund_status": Message(
         text=(
-            "For your security, balances are only available online or from an agent. "
-            "Returning to the billing menu."
+            "Refunds usually appear on your original payment method within three to five "
+            "business days. Returning to the returns and refunds menu."
         ),
-        next="billing",
+        next="refunds",
     ),
 }
 
 INVALID_OPTION = "Sorry, that is not a valid option."
 NO_INPUT_GOODBYE = "We did not receive a selection. Goodbye."
 
-QUEUE_INTRO = "All of our agents are currently assisting other customers. Please stay on the line."
+QUEUE_INTRO = (
+    "All of our associates are currently assisting other customers. Please stay on the line."
+)
 HOLD_ANNOUNCEMENTS = (
     "Your call is important to us. Please continue to hold.",
-    "Thank you for your patience. An agent will be with you shortly.",
-    "Did you know you can manage your account online at acme dot example?",
+    "Thank you for your patience. An associate will be with you shortly.",
+    "Did you know you can start most returns in the Your Orders section of the Amazon app?",
 )
 CALLBACK_OFFER = (
     "To receive a callback instead of waiting, press 1. Otherwise, please stay on the line."
 )
 CALLBACK_ASK_NUMBER = "Please enter the ten digit number we should call, followed by the pound key."
 CALLBACK_CONFIRM = "Thank you. We will call you back at the number you entered. Goodbye."
-CONNECTING = "Thank you for holding. Connecting you to a representative now."
+CONNECTING = "Thank you for holding. Connecting you to an associate now."
 
 # Built-in scripted rep, used when no rep number / bot-rep URL is configured.
-# Mirrors the demo: PIN request (ask_user), paid upgrade offer (guard), fee waived.
+# Mirrors the demo: a verification question (ask_user, or the user's pre-call info),
+# a paid Prime upsell (guard), then the refund and a reference number.
 REP_SCRIPT: tuple[RepLine, ...] = (
-    RepLine("Thanks for holding, this is Alex in billing. How can I help you today?"),
+    RepLine("Thanks for calling Amazon, this is Alex. How can I help you today?"),
     RepLine(
-        "I can look into that for you. First, can you give me the account PIN?",
+        "I'm sorry to hear that. I can help. First, can I get the order number, please?",
         expects_turns=2,
     ),
     RepLine(
-        "Thank you, you are verified. I see the forty dollar late fee. While I have you, our "
-        "premium plan is nine ninety nine a month and avoids late fees. Would you like to upgrade?"
+        "Thank you, you're verified. I see the order for the wireless headphones. While I have "
+        "you, would you like to try Prime? It's free for thirty days, then fourteen ninety nine "
+        "a month. Would you like to upgrade?"
     ),
     RepLine(
-        "No problem. I have waived the forty dollar late fee. "
-        "Your reference number is A 7 X 2 9 1. Is there anything else I can help with?"
+        "No problem. I've issued a full refund of forty nine ninety nine to your original "
+        "payment method. Your reference number is A 7 X 2 9 1. Is there anything else I can "
+        "help with?"
     ),
-    RepLine("Thanks for calling Acme. Have a great day. Goodbye.", hangup_after=True),
+    RepLine("Thanks for calling Amazon. Have a great day. Goodbye.", hangup_after=True),
 )
 REP_NUDGE = "Hello? Are you still there?"
 REP_TAKE_YOUR_TIME = "Sure, take your time."

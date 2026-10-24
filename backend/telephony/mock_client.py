@@ -1,4 +1,4 @@
-"""Mock twin of the Twilio client (USE_MOCKS=true): an in-process fake support line.
+"""The in-process fake support line (TELEPHONY=mock, and under the browser phone).
 
 `place_call()` starts a simulated call that walks the same script as the TwiML
 fake line (`fakeline/script.py`): welcome, menus that react to `press_digits()`,
@@ -292,6 +292,8 @@ class MockLine:
 
 
 class MockTelephonyClient(CallControl):
+    line_cls: type[MockLine] = MockLine
+
     def __init__(
         self,
         *,
@@ -303,6 +305,7 @@ class MockTelephonyClient(CallControl):
         hold_chunk_s: float = 20.0,
     ) -> None:
         self.speed = speed
+        self.line_speed = speed if speed > 0 else float("inf")
         self.hold_seconds = hold_seconds
         self.callback_offer = callback_offer
         self.rng = random.Random(seed)
@@ -323,7 +326,7 @@ class MockTelephonyClient(CallControl):
         offer = self.callback_offer
         if not isinstance(offer, bool):
             offer = self.rng.random() < offer
-        line = MockLine(
+        line = self.line_cls(
             session.id,
             speed=self.speed,
             hold_seconds=self.hold_seconds,

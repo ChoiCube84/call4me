@@ -1,70 +1,136 @@
 # call4me
 
-An iPhone app and voice agent that makes customer service calls for Deaf and
-hard-of-hearing users: it navigates the phone menu, waits on hold, talks to the
-rep, and asks the user only for what only they know. Full design: `CLAUDE.md`.
+**Deaf people can't use phone-only customer service. Now they can, by typing.**
 
-## Run it now (no API keys)
+call4me is a mobile web app and a voice agent that makes a customer service call for
+you, start to finish. It goes through the phone menu, waits on hold, talks to the
+rep, and asks you only for what only you know (an order number, a PIN, a yes/no).
+You read the whole call as live captions and can take over by typing at any time.
+Built at Cal Hacks 13.0 for Deaf and hard-of-hearing adults. Full design: `CLAUDE.md`.
 
-Every external service has a mock twin, so the whole call runs locally against
-an in-process fake support line.
+## How it works
+
+```
+Phone browser: web app (/)  ──REST + WebSocket (token)──▶  Backend (FastAPI) on Azure Container Apps
+Judges view (/dashboard/)                                   ├─ serves the web app (static Next.js export)
+                                                            ├─ Call state engine ── Jev (TypeSafe) decisions
+                                                            ├─ Claude: conversation, greeting, summaries
+                                                            ├─ Guard: disclosure, privacy, limits (in code)
+                                                            ├─ PostgreSQL · Key Vault · Application Insights
+                                                            ▼
+                                   Cartesia: voice agent that dials the company (TELEPHONY=cartesia)
+                                   or our own pipeline + fake line (TELEPHONY=phone)
+```
+
+Two ways to place a call, chosen with `TELEPHONY`:
+
+| Mode | What dials | Who is the rep | Use it for |
+|---|---|---|---|
+| `cartesia` (default on Azure) | A Cartesia agent calls the real number from a Cartesia phone number. Our backend gets every utterance by webhook and answers the agent's tool calls (ask the user, check an offer against the limits, record the outcome). | A real company, or your own cell for testing | Real calls |
+| `phone` | Our own pipeline: Cartesia speech-to-text and voice, Jev, Claude, guard | Whoever opens `/phone` in a browser; it plays the fake company's menu and hold music first | Backup demo, no phone network |
+
+With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake line.
+
+Safety rules enforced in code (CLAUDE.md section 2): the agent always says it is an AI
+calling for you; anything you answer is spoken once and then redacted everywhere; it
+never makes up facts about you; it never relays a full SSN, card number, or password;
+it can't agree to anything outside your goal and limits; you can take over at any time;
+every decision goes into an append-only audit log.
+
+How strictly these hold depends on the mode. In `phone` mode the guard checks every line
+before it is spoken. In `cartesia` mode Cartesia's agent speaks for itself: the disclosure,
+the limits, and the no-SSN rule are in its instructions, and offers go through our
+`check_offer` tool. Our side redacts everything before it is logged, stored, or shown, and
+deletes the call data at Cartesia once the call is wrapped up. The guard still can't block
+a sentence before Cartesia's agent says it.
+
+## Run it locally
 
 ```bash
 uv sync
-USE_MOCKS=true uv run python -m evals.live_call      # one full call, printed live (~1 min)
-uv run pytest -q                                     # unit + integration + 2 full-call e2e tests
-USE_MOCKS=true uv run python -m evals.run --driver product --guard real   # 11-scenario eval table
+uv run pytest -q                                       # unit + integration + full-call tests
+USE_MOCKS=true uv run python -m evals.live_call        # one full call on mocks, printed live
+docker compose up -d                                   # local Postgres
+(cd web && npm ci && npm run build)                    # the web app -> web/out, served at /
+USE_MOCKS=true uv run uvicorn backend.main:app --reload
+open http://localhost:8000/                            # web app; /dashboard/ = judges view
 ```
 
-Server + dashboard:
+For web app development with hot reload: `cd web && NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev`
+(see `web/README.md`).
+
+Real services: copy `.env.example` to `.env` and fill in the keys.
+
+- **Phone mode:** `TELEPHONY=phone uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000`.
+  Open `http://localhost:8000/phone` (the rep; tap **Get ready**) and the web app (the
+  user). `uv run python -m evals.phone_rep` plays a scripted rep instead.
+- **Cartesia mode** needs a public https URL for Cartesia's webhooks: run
+  `cloudflared tunnel --url http://localhost:8000` and set `PUBLIC_BASE_URL` to it. On
+  start the server creates or updates the Cartesia agent, tools, webhook, and phone number
+  (`uv run python -m backend.cartesia.setup` does it by hand and prints them).
+
+## Deploy to Azure
 
 ```bash
-docker compose up -d                                  # Postgres (or set DATABASE_URL=sqlite+aiosqlite:///./dev.db)
-USE_MOCKS=true uv run uvicorn backend.main:app --reload
-open http://localhost:8000/dashboard/
+az login                      # the subscription with the credits
+./infra/deploy.sh             # resource group call4me-rg in northcentralus
 ```
 
-Start a call from the dashboard, then watch the menu, hold, rep, the `ask_user` box
-(type a PIN), takeover/type-to-talk, the guard blocking the upsell, the summary,
-and the audit log with the PIN shown as `[REDACTED]`.
+This creates Container Apps, PostgreSQL, Key Vault, Application Insights, and a container
+registry. It copies the secrets from `.env` into Key Vault, then builds the image (web app
+included) and rolls it out. It prints the web app URL.
+Azure for Students only allows a few regions, and the script checks for that. Details and
+troubleshooting: `infra/README.md`.
+
+On Azure every API call needs the access token (`API_TOKEN`, generated by `deploy.sh`).
+`POST /calls` dials real numbers, so the API is never open. The web app asks for the
+token once. To print it:
+`az keyvault secret show --vault-name <vault> --name api-token --query value -o tsv`.
+
+## The web app (on your phone)
+
+Open the Azure URL on your phone. iPhone: Safari > Share > **Add to Home Screen**. Android:
+Chrome > menu > **Install app**. Enter the access code once. During a call:
+
+- Captions are large, and the banner shows where the call is (menu, hold with a timer, a
+  person, needs your answer).
+- When the agent needs something only you know, the whole screen flashes and the phone
+  vibrates where supported. Nothing relies on sound. Type the answer. For private items (full
+  card number, SSN, password), tap **Say it myself** and type it to the rep.
+- **Take over** at any time and type. call4me speaks your words. Hand back with one tap.
+- The screen stays awake (Wake Lock), and the app reconnects by itself if the network drops.
+
+Keep the app open during a call. Web push notifications are a later stretch goal. The judges
+view is at `/dashboard/`. The native iOS app in `ios/` is shelved.
+
+## Evals
+
+```bash
+USE_MOCKS=false uv run python -m evals.run --driver product --guard real
+```
+
+11 scripted scenarios on the fake line: cancellation, fee waiver, order status, callback
+offer, transfer back to hold, menu loop, rep asks for a PIN, paid upgrade offer, rep
+refuses to talk to an AI, user takeover, rep asks for an SSN. The scored driver is our own
+pipeline (phone mode) with real Claude and Jev and the real guard:
+`evals/results/product-claude.json` passed **11/11**, with 0 safety violations.
+`product-mock-llm.json` used the mock LLM.
 
 ## What's where
 
 | Path | What |
 |---|---|
-| `backend/calls.py` | Runs one live call: telephony → audio → STT → engine → Claude agent → guard → TTS |
-| `backend/main.py` | REST + WebSocket API (CLAUDE.md §10, plus `/devices`, `/calls/{id}/hold`, `/calls/{id}/audit`, `/metrics`) |
-| `backend/engine/` | State machine, Jev checks, menu navigation, human detection |
+| `backend/main.py` | REST + WebSocket API (`/calls`, `/requests/{id}/answer`, `/devices`, `/metrics`, ...) |
+| `backend/auth.py` | Access token check on every route (when `API_TOKEN` is set) |
+| `backend/cartesia/` | Cartesia mode: agent setup, webhook + tools, one call (`call.py`) |
+| `backend/calls.py` | Phone/mock mode: telephony → audio → STT → engine → Claude → guard → TTS |
+| `backend/engine/` | Call states, Jev checks, menu navigation, human detection |
 | `backend/agent/` | Claude tool-use loop, `ask_user`, guard layer |
-| `backend/telephony/`, `fakeline/` | Twilio client + media stream; fake support line (mounted at `/fakeline`) |
+| `backend/telephony/`, `fakeline/` | Phone-mode line (`/phone` page) and mock line; the fake company's menu and hold audio |
 | `backend/audio/`, `backend/speech/` | VAD, music classifier; Cartesia STT/TTS |
-| `backend/notify/apns.py`, `backend/telemetry.py` | APNs push + Live Activities; Application Insights |
-| `evals/` | Scenarios, simulator, scoring; `product_driver.py` (the product in the sim); `live_call.py` (real pipeline) |
-| `dashboard/` | Demo dashboard (static, served at `/dashboard/`) |
-| `ios/` | SwiftUI app + Live Activity widget (see `ios/README.md`) |
-| `infra/` | Azure Bicep + `deploy.sh` (see `infra/README.md`) |
-
-## Going live: what you need to provide
-
-Put these in `.env` (template: `.env.example`) and set `USE_MOCKS=false`. Any
-service whose key is missing falls back to its mock with a warning.
-
-| Service | Variables | Unlocks |
-|---|---|---|
-| Anthropic | `ANTHROPIC_API_KEY` | Real Claude conversation, greeting, summaries |
-| Cartesia | `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID` | Real speech-to-text and voice |
-| Twilio (upgraded account) | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_AGENT_NUMBER`, `TWILIO_FAKELINE_NUMBER` | Real phone calls |
-| Public URL | `PUBLIC_BASE_URL` (ngrok in dev, Azure URL in prod) | Twilio webhooks + media stream |
-| TypeSafe | `TYPESAFE_API_KEY` | Jev decisions (else keyword heuristics) |
-| Apple | `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_AUTH_KEY_PATH`, `APNS_TOPIC` + signing team in Xcode | Push, lock-screen answers, Live Activities |
-| Azure | `az login`, then `infra/deploy.sh` | Hosting, Postgres, Key Vault, App Insights |
-
-Twilio console webhooks (shown by `infra/deploy.sh`):
-- Agent number → Voice "A call comes in": `POST {PUBLIC_BASE_URL}/twilio/voice`
-- Fake line number → Voice "A call comes in": `POST {PUBLIC_BASE_URL}/fakeline/voice`
-- Status callbacks go to `{PUBLIC_BASE_URL}/twilio/status` (set per call by the backend)
-- Optional: `FAKELINE_REP_NUMBER` = a teammate's phone to play the rep (else a scripted rep answers)
-
-Then: `USE_MOCKS=false uv run python -m evals.run --driver product --guard real`
-scores real Claude on the 11 scenarios. Do this before quoting numbers: the
-saved report in `evals/results/` was produced with the mock LLM.
+| `backend/config.py`, `backend/telemetry.py` | Settings from env or Key Vault; Application Insights (redacted) |
+| `web/` | Mobile web app (Next.js + Tailwind, static export served at `/`; judges view at `/dashboard/`) |
+| `dashboard/` | Backup console (`/console/`) and the phone-mode rep page (`/phone`) |
+| `evals/` | Scenarios, simulator, scoring, product driver |
+| `ios/` | Shelved native iOS app (replaced by `web/`) |
+| `infra/` | Azure Bicep + `deploy.sh` |

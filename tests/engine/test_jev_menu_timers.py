@@ -14,6 +14,7 @@ from backend.engine.menu import (
     DbMenuPathStore,
     MemoryMenuPathStore,
     MenuNavigator,
+    decline_callback_options,
     parse_menu_options,
 )
 from backend.engine.timers import CallTimers, TimerEvent
@@ -272,3 +273,36 @@ def test_max_hold_accumulates_across_hold_stretches_and_extends() -> None:
     clock.advance(51)
     t.heard_sound()
     assert t.due() == [TimerEvent.MAX_HOLD]
+
+
+async def test_navigator_back_at_a_menu_tries_another_branch() -> None:
+    billing = {"1": "a fee or charge", "2": "make a payment", "9": "go back"}
+    jev = jev_checks.MockDecisionClient()
+    nav = MenuNavigator(jev, goal="Cancel my streaming subscription")
+    jev.script(jev_checks.MENU_CHOICE, "2", 0.9)
+    assert (await nav.decide(MENU, "main")).value == "2"
+    jev.script(jev_checks.MENU_CHOICE, "9", 0.9)
+    assert (await nav.decide(billing, "billing")).value == "9"
+    jev.script(jev_checks.MENU_CHOICE, "0", 0.9)
+    assert (await nav.decide(MENU, "main")).value == "0"
+    assert set(jev.calls[-1][1]) == {"1", "0"}  # billing was not offered again
+
+
+async def test_state_check_menu_offering_a_callback_is_a_callback_offer() -> None:
+    jev = jev_checks.MockDecisionClient()
+    jev.script(jev_checks.STATE_CHECK, "menu", 0.9)
+    d = await jev_checks.classify_state(
+        jev,
+        transcript="To get a callback instead of waiting, press 1. Or stay on the line.",
+        audio_label=None,
+        current_state=CallState.HOLD,
+    )
+    assert (d.choice, d.probability) == ("callback_offer", 0.9)
+
+
+def test_decline_callback_drops_the_accepting_key() -> None:
+    offer = parse_menu_options("To get a callback instead of waiting, press 1. Or stay on hold.")
+    assert offer == {"1": "get a callback instead of waiting"}
+    assert decline_callback_options(offer) == {}
+    both = {"1": "receive a call back", "2": "keep holding"}
+    assert decline_callback_options(both) == {"2": "keep holding"}

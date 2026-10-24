@@ -1,4 +1,4 @@
-"""Inbound audio pipeline: Twilio mu-law -> PCM -> (VAD, classifier, STT).
+"""Inbound audio pipeline: phone-line mu-law -> PCM -> (VAD, classifier, STT).
 
 Usage (call-engine wiring):
 
@@ -16,6 +16,7 @@ Audio is processed live and never written anywhere.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 
 from backend.audio.classifier import AudioClassifier, FrameFeatures, HeuristicMusicClassifier
@@ -62,6 +63,9 @@ class AudioPipeline:
         self.last_label: AudioLabel | None = None
         self.frames_in = 0
         self.frames_to_stt = 0
+        # Last time the far end was audibly speaking (VAD), outside our own playback.
+        # Transcripts lag the audio, so this tells "still mid-sentence" apart from "done".
+        self.last_voice_at = 0.0
 
     async def push(self, mulaw: bytes) -> list[AudioLabel]:
         """Process any amount of mu-law audio; returns labels completed by it."""
@@ -75,13 +79,16 @@ class AudioPipeline:
     async def _process_frame(self, frame: bytes) -> AudioLabel | None:
         self.frames_in += 1
         samples = mulaw_to_samples(frame)
+        active = self.vad.is_active(samples)
         self._window.append(
             FrameFeatures(
                 level_db=rms_db(samples),
                 zcr=zero_crossing_rate(samples),
-                active=self.vad.is_active(samples),
+                active=active,
             )
         )
+        if active and not (self.echo and self.echo.agent_speaking):
+            self.last_voice_at = time.monotonic()
 
         if self.stt is not None and not (self.echo and self.echo.suppress_audio()):
             pcm = self._resampler.process(samples_to_pcm16(samples))

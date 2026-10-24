@@ -7,3 +7,8 @@ ios
 infra
 tests
 **/__pycache__
+web/node_modules
+web/.next
+web/out
+dev.db
+web/.env*

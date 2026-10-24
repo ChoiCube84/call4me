@@ -1,6 +1,6 @@
 """Telephony-side extensions to the shared `TelephonyClient` contract.
 
-Both the real Twilio client and the mock twin implement `CallControl`, so
+The mock line and the browser phone implement `CallControl`, so
 call-engine can rely on these extras in either mode. Everything in
 `backend/contracts.py` stays the primary interface.
 """
@@ -20,7 +20,7 @@ DIGITS_PATTERN = r"^[0-9*#wW]+$"
 
 
 class CallStatus(enum.StrEnum):
-    """Twilio CallStatus values."""
+    """Call status values (the names telephony providers commonly use)."""
 
     QUEUED = "queued"
     INITIATED = "initiated"
@@ -76,6 +76,13 @@ class CallControl(TelephonyClient, abc.ABC):
     Audio contract (both directions): 8 kHz mu-law, 20 ms frames of 160 bytes.
     `audio_in()` has a single consumer per session; it ends when the call ends.
     """
+
+    # Seconds of audio played per real second. Only the mock line runs faster
+    # (sped-up tests); the engine uses this to know when sent audio has been heard.
+    line_speed: float = 1.0
+    # True when the far end removes our own audio from what it sends back (the
+    # browser phone's echo canceller), so inbound audio needn't be muted while we talk.
+    echo_cancelled: bool = False
 
     @abc.abstractmethod
     async def wait_connected(self, session_id: str, timeout: float = 30.0) -> bool:  # noqa: ASYNC109

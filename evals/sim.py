@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from backend.agent.guard import AGENT_WRAP_UP
 from backend.agent.ports import AgentRuntime
 from backend.audit import log as audit
 from backend.contracts import (
@@ -269,6 +270,9 @@ class SimulatedCall:
         self._tick(speech_seconds(text))
         self.rec._spoken.append((Speaker.REMOTE, text))
         self.runtime.remote_history.append(audit.redact(text))
+        self.runtime.awaiting_reply = False
+        self.runtime.rep_turns += 1
+        self.runtime.presence_checks = 0
         self._corpus.append(text)
         await self._log("caption", speaker="remote", text=text)
         self._publish("caption", speaker="remote", text=text)
@@ -305,6 +309,12 @@ class SimulatedCall:
                 self._publish("event", kind="guard_denied", reason=result.reason)
                 if result.trigger_takeover and not self._takeover:
                     await self._request_takeover("guard: " + result.reason, heard)
+                elif (on_denied := getattr(self.driver, "on_denied", None)) is not None:
+                    # Like the product: the agent hears "blocked: ..." and may act again.
+                    retry = await on_denied(kind, result.reason)
+                    sub = await self._exec(retry)
+                    heard.speech.extend(sub.speech)
+                    heard.digits += sub.digits
                 return
             if result.action is not None:
                 action = result.action
@@ -341,6 +351,9 @@ class SimulatedCall:
         self._tick(speech_seconds(text))
         self.rec._spoken.append((Speaker.AGENT, text))
         self.runtime.spoken.append(audit.redact(text))
+        self.runtime.awaiting_reply = "?" in text
+        if AGENT_WRAP_UP.search(text):
+            self.runtime.closing_at_turn = self.runtime.rep_turns
         if self.runtime.one_shot_relay and self.runtime.one_shot_relay in text:
             self.runtime.one_shot_relay = None
         if self._awaiting_disclosure is not None:

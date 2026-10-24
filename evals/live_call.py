@@ -9,6 +9,7 @@ user would.
 
     uv run python -m evals.live_call                 # real time (~1-2 min)
     uv run python -m evals.live_call --hold 5 --pin 4321
+    uv run python -m evals.live_call --real-llm      # real Claude on the mock line
 """
 
 from __future__ import annotations
@@ -54,10 +55,10 @@ async def run_live_call(
         r = await client.post(
             "/calls",
             json={
-                "company": "Fake Support Line (test)",
-                "phone_number": "+15550100000",
-                "goal": "Remove the $40 late fee",
-                "limits": {"notes": "no plan changes"},
+                "company": "Amazon Customer Service",
+                "phone_number": "+15550100100",
+                "goal": "Get a refund for wireless headphones that arrived damaged.",
+                "limits": {"notes": "No subscriptions or new charges."},
                 "disclosure_text": "Hi, I'm an AI assistant calling on behalf of Sam Lee.",
             },
         )
@@ -130,8 +131,15 @@ def main() -> None:
     p.add_argument("--hold", type=float, default=5.0, help="seconds of hold music")
     p.add_argument("--pin", default="4321", help="what the 'user' types for the PIN")
     p.add_argument("--speed", type=float, default=1.0, help="line speed (1 = real time)")
+    p.add_argument(
+        "--real-llm",
+        action="store_true",
+        help="use real Claude (ANTHROPIC_API_KEY); the line, speech and Jev stay mocked "
+        "unless their keys are set",
+    )
     args = p.parse_args()
-    os.environ["USE_MOCKS"] = "true"
+    # The fake line is always the in-process mock; other services follow their keys.
+    os.environ["USE_MOCKS"] = "false" if args.real_llm else "true"
     result = asyncio.run(run_live_call(hold_s=args.hold, pin=args.pin, speed=args.speed))
     s = result["call"]["session"]
     print(f"\nfinal state={s['state']} outcome={s['outcome']!r} ref={s['reference_number']}")

@@ -1,6 +1,6 @@
 """What the conversation agent needs from the rest of the system.
 
-The agent never touches Twilio, Cartesia, the state machine, or the database
+The agent never touches the phone line, Cartesia, the state machine, or the database
 directly. It talks to these small ports, so other areas can wire in their real
 implementations (engine `transition()`, TTS + telephony speech, DB rows) while
 tests use the in-memory twins at the bottom of this file.
@@ -111,7 +111,19 @@ class AgentRuntime:
     # What the agent has said (redacted). Used for the end-of-call read-back check.
     spoken: list[str] = field(default_factory=list)
     pending_request_id: str | None = None
+    # The agent asked the rep something (e.g. a read-back) and hasn't heard back yet.
+    awaiting_reply: bool = False
+    # The rep said something Claude hasn't seen yet (it arrived mid-turn).
+    unseen_rep: bool = False
     ended: bool = False
+    # Ending the call (guard rule): both sides must be done, or nobody is there.
+    rep_turns: int = 0  # rep utterances so far
+    closing_at_turn: int | None = None  # rep_turns when the agent last said a wrap-up line
+    presence_checks: int = 0  # "rep silent" nudges since the rep last spoke
+    takeover_suggested: bool = False  # waiting on the user to decide; don't hang up on them
+    # Info the user typed before the call (label -> value). Memory only, never stored;
+    # Claude sees the labels and shares a value with the share_info tool.
+    known_info: dict[str, str] = field(default_factory=dict)
 
     @property
     def last_remote_text(self) -> str:

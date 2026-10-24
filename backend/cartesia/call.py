@@ -1,0 +1,533 @@
+"""One call placed and run by a Cartesia Managed Agent (TELEPHONY=cartesia).
+
+Cartesia dials the company from our Cartesia number and runs the conversation
+(listening, Claude, speaking, keypad tones). We stay in the loop through:
+
+- the call webhook: every utterance (`call_turn`) becomes a live caption, and
+  `call_completed` / `call_failed` wrap the call up;
+- webhook tools the agent calls: ask the user (they type), check an offer against
+  the user's limits, report where the call is, record the outcome.
+
+Same surface as `calls.LiveCall` (takeover, handback, type_text, cancel, ...), so
+the API endpoints and dashboard don't care which one runs a call.
+
+Privacy: answers and pre-call info are registered for redaction before anything
+is logged or shown; our DB and live channel only ever see redacted text. Cartesia
+does see them (its agent has to say them), and keeps call data until we delete it:
+we delete it as soon as the call is wrapped up.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from typing import Any
+
+from backend.agent.guard import looks_high_sensitivity
+from backend.agent.ports import (
+    BrokerAnswerSource,
+    DbAuditSink,
+    DbRequestStore,
+    MemoryRequestStore,
+    NotifierUserChannel,
+    RequestStore,
+)
+from backend.audit import log as audit
+from backend.cartesia import setup as cartesia_setup
+from backend.cartesia.api import CartesiaAgentsApi
+from backend.cartesia.spec import ASK_USER_WAIT_S
+from backend.contracts import (
+    CallEvent,
+    CallSession,
+    CallState,
+    LiveMessage,
+    Sensitivity,
+    UserRequest,
+    UserRequestStatus,
+    utcnow,
+)
+from backend.engine import states as st
+from backend.notify.live import hub
+
+log = logging.getLogger("call4me.cartesia.call")
+
+S = CallState
+PRE_PERSON = frozenset({S.DIALING, S.MENU, S.HOLD, S.RECORDED_MESSAGE, S.CALLBACK_OFFERED})
+# Cartesia `end_reason` -> what the user reads.
+END_REASONS = {
+    "agent_hangup": "The assistant ended the call.",
+    "client_hangup": "The company ended the call.",
+    "api_cancelled": "You cancelled the call.",
+    "voicemail_detected": "The call reached voicemail.",
+    "call_inactivity": "The call ended after a long silence.",
+    "client_inactivity": "The call ended after a long silence.",
+    "max_duration": "The call reached its time limit.",
+    "dial_no_answer": "No one answered.",
+    "dial_busy": "The line was busy.",
+    "dial_failed": "The call could not be placed.",
+    "dial_timeout": "No one answered.",
+}
+STATUS_POLL_S = 15.0  # backup to the webhook: notice a finished call even if events are lost
+
+by_call_id: dict[str, CartesiaCall] = {}
+
+
+def _limits_text(session: CallSession) -> str:
+    lim = session.limits
+    parts = [
+        "Plan or subscription changes allowed."
+        if lim.allow_plan_changes
+        else "No plan or subscription changes.",
+        "Cancellation allowed." if lim.allow_cancellation else "No cancellations.",
+        f"Spend at most ${lim.max_spend_usd:g}." if lim.max_spend_usd else "No new charges.",
+    ]
+    if lim.notes:
+        parts.append(lim.notes)
+    return " ".join(parts)
+
+
+class CartesiaCall:
+    relays_messages = True  # typed text goes to the agent, which says it (no takeover)
+
+    def __init__(
+        self,
+        session: CallSession,
+        *,
+        settings: Any,
+        known_info: dict[str, str] | None = None,
+        api: CartesiaAgentsApi | None = None,
+        persist: bool = True,
+    ) -> None:
+        self.session = session
+        self.id = session.id
+        self.settings = settings
+        self.persist = persist
+        self.known_info = dict(known_info or {})
+        for value in self.known_info.values():
+            audit.register_secret(session.id, value)
+        self.api = api or CartesiaAgentsApi(settings.cartesia_api_key)
+        self.call_id: str | None = None
+        self.recorder: st.TransitionRecorder = st.DbRecorder() if persist else st.MemoryRecorder()
+        self.requests: RequestStore = DbRequestStore() if persist else MemoryRequestStore()
+        self.audit_sink = DbAuditSink()
+        self.user = NotifierUserChannel()
+        self.answers = BrokerAnswerSource()
+        self.transcript: list[str] = []
+        self.outcome: str | None = None
+        self.reference: str | None = None
+        self._messages: list[str] = []  # typed by the user, for the agent to say
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._finished = asyncio.Event()
+        self._finishing = False
+
+    # ------------------------------------------------------------- lifecycle
+
+    async def start(self) -> None:
+        try:
+            setup = cartesia_setup.current() or await cartesia_setup.ensure(self.settings)
+            self.call_id = await self.api.start_call(
+                agent_id=setup.agent_id,
+                from_number_id=setup.from_number_id,
+                to_number=self.session.phone_number,
+                dynamic_variables=self._variables(),
+            )
+        except Exception as e:  # noqa: BLE001 - a failed dial ends this call, not the server
+            log.exception("could not start Cartesia call for %s", self.id)
+            await self._fail(_dial_failure(e))
+            return
+        by_call_id[self.call_id] = self
+        await self._audit("call.dial", f"Cartesia call {self.call_id} placed")
+        self._spawn(self._poll_status())
+
+    def _variables(self) -> dict[str, str | int | float | bool]:
+        known = "; ".join(f"{k}: {v}" for k, v in self.known_info.items()) or "none"
+        return {
+            "session_id": self.id,
+            "company": self.session.company,
+            "goal": self.session.goal,
+            "limits": _limits_text(self.session),
+            "known_info": known,
+            "disclosure": self.session.disclosure_text,
+        }
+
+    async def _poll_status(self) -> None:
+        while not self._finished.is_set():
+            await asyncio.sleep(STATUS_POLL_S)
+            if self.call_id is None or self._finishing:
+                return
+            with contextlib.suppress(Exception):
+                call = await self.api.get_call(self.call_id)
+                if call.get("status") in ("completed", "failed"):
+                    await self.finish(call)
+
+    # ------------------------------------------------------------- call webhook
+
+    async def on_event(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "call_turn":
+            await self._on_turn(event.get("turn") or {})
+        elif kind == "call_started":
+            await self._audit("call.connected", "the company picked up")
+        elif kind in ("call_completed", "call_failed"):
+            await self.finish(event.get("call") or {})
+
+    async def _on_turn(self, turn: dict[str, Any]) -> None:
+        for tc in turn.get("tool_calls") or []:
+            if tc.get("name") == "send_dtmf":
+                args = tc.get("arguments") or {}
+                digits = str(args.get("digits") or args.get("tones") or args)
+                await self._event("menu_action", {"action": "dtmf", "value": audit.redact(digits)})
+        text = audit.redact(str(turn.get("text") or "").strip())
+        if not text:
+            return
+        speaker = "agent" if turn.get("role") == "assistant" else "remote"
+        hub.publish(
+            LiveMessage(
+                type="caption",
+                session_id=self.id,
+                data={"speaker": speaker, "text": text, "final": True},
+            )
+        )
+        self.transcript.append(f"{speaker}: {text}")
+        if self.persist:
+            await self._event("caption", {"speaker": speaker, "text": text}, audit_action=None)
+
+    # ------------------------------------------------------------- tools
+
+    async def tool(self, name: str, args: dict[str, Any]) -> str:
+        handler = {
+            "ask_user": self._ask_user,
+            "check_offer": self._check_offer,
+            "report_state": self._report_state,
+            "finish": self._finish_tool,
+        }.get(name)
+        if handler is None:
+            return f"unknown tool {name}"
+        result = await handler(args)
+        return result + self._pending_messages()
+
+    def _pending_messages(self) -> str:
+        if not self._messages:
+            return ""
+        lines = " ".join(f'"{m}"' for m in self._messages)
+        self._messages.clear()
+        return f"\nMessage from the customer for the rep. Say it now, word for word: {lines}"
+
+    async def _ask_user(self, args: dict[str, Any]) -> str:
+        question = str(args.get("question") or "").strip() or "The rep needs information."
+        try:
+            sensitivity = Sensitivity(str(args.get("sensitivity") or "medium"))
+        except ValueError:
+            sensitivity = Sensitivity.MEDIUM
+        if sensitivity is Sensitivity.HIGH:
+            await self._deny("ask_user", "high-sensitivity info is never relayed by the agent")
+            await self.user.alert(
+                self.session.user_id,
+                "The rep asked for sensitive info",
+                audit.redact(question),
+                category="TAKEOVER",
+                data={"session_id": self.id, "haptic": True},
+            )
+            return (
+                "Not allowed: never relay a full card number, SSN, or password. Tell the rep "
+                "the customer will provide it another way, and continue."
+            )
+        request = UserRequest(session_id=self.id, question=question, sensitivity=sensitivity)
+        future = self.answers.expect(request.id)
+        await self._go(S.WAITING_ON_USER, "ask_user: waiting for the user")
+        try:
+            await self.requests.create(request)
+            await self._audit("user_request.created", "asked the user", subject=request.id)
+            await self.user.ask(self.session.user_id, request)
+            self.user.publish(
+                LiveMessage(
+                    type="ask_user",
+                    session_id=self.id,
+                    data={
+                        "request_id": request.id,
+                        "question": audit.redact(question),
+                        "sensitivity": sensitivity.value,
+                        "timeout_s": ASK_USER_WAIT_S,
+                    },
+                )
+            )
+            try:
+                answer = await asyncio.wait_for(asyncio.shield(future), ASK_USER_WAIT_S)
+            except TimeoutError:
+                answer = None
+        finally:
+            self.answers.release(request.id)
+        if answer is None:
+            await self.requests.set_status(request.id, UserRequestStatus.TIMED_OUT)
+            await self._go(S.IN_CONVERSATION, "ask_user timed out")
+            return (
+                "No answer yet. Ask the rep to hold a little longer, then call "
+                "call4me_ask_user again."
+            )
+        answer = answer.strip()
+        audit.register_secret(self.id, answer)  # the endpoint did too; harmless twice
+        if looks_high_sensitivity(answer, question):
+            await self._deny("relay", "answer looks like a full card number or SSN")
+            await self._go(S.IN_CONVERSATION, "ask_user answer not relayed")
+            return (
+                "The customer's answer is too sensitive to say. Tell the rep they will "
+                "provide it another way."
+            )
+        await self._audit("user_request.relayed", "answer handed to the agent", subject=request.id)
+        await self._go(S.IN_CONVERSATION, "ask_user answered")
+        return f"The customer answered: {answer}\nTell the rep now. Read numbers digit by digit."
+
+    async def _check_offer(self, args: dict[str, Any]) -> str:
+        kind = str(args.get("kind") or "other")
+        what = str(args.get("description") or kind)
+        try:
+            amount = float(args.get("amount_usd") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        lim = self.session.limits
+        allowed, why = True, ""
+        if kind == "plan_change" and not lim.allow_plan_changes:
+            allowed, why = False, "the customer did not allow plan or subscription changes"
+        elif kind == "cancellation" and not lim.allow_cancellation:
+            allowed, why = False, "the customer did not allow cancellations"
+        if allowed and amount > (lim.max_spend_usd or 0):
+            allowed, why = False, f"${amount:g} is over the customer's spending limit"
+        if allowed:
+            await self._audit("guard.check_offer", f"allowed: {audit.redact(what)}")
+            if kind == "other":
+                return "Allowed only if it is part of the goal. Otherwise politely decline."
+            return "Allowed. Confirm the details with the rep."
+        await self._deny(kind, f"{why} ({audit.redact(what)})")
+        return f"Not allowed: {why}. Politely decline and steer back to the goal."
+
+    async def _report_state(self, args: dict[str, Any]) -> str:
+        target = {"menu": S.MENU, "hold": S.HOLD, "person": S.IN_CONVERSATION}.get(
+            str(args.get("state") or "")
+        )
+        note = audit.redact(str(args.get("note") or ""))[:200]
+        if target is not None:
+            await self._go(target, note or f"agent: {args.get('state')}")
+        return "noted"
+
+    async def _finish_tool(self, args: dict[str, Any]) -> str:
+        self.outcome = audit.redact(str(args.get("summary") or "")).strip() or None
+        ref = str(args.get("reference_number") or "").strip()
+        self.reference = audit.redact(ref) if ref else None
+        await self._audit("call.outcome", "agent recorded the outcome")
+        return "Recorded. Say goodbye; end the call once the rep has said goodbye."
+
+    # ------------------------------------------------------------- user controls
+
+    async def takeover(self) -> bool:
+        # A Cartesia agent can't be muted from outside; the user sends messages instead.
+        return False
+
+    async def handback(self) -> bool:
+        return False
+
+    async def type_text(self, text: str) -> None:
+        """A message for the rep, said by the agent with its next tool call."""
+        audit.register_secret(self.id, text.strip())  # may hold private details
+        self._messages.append(text.strip())
+        await self._event("user_message", {"chars": len(text)})
+
+    async def continue_hold(self, keep_waiting: bool) -> None:
+        if not keep_waiting:
+            await self.cancel()
+
+    async def cancel(self) -> None:
+        if self.call_id is None:
+            return
+        try:
+            await self.api.cancel_call(self.call_id)
+        except Exception:  # noqa: BLE001 - it may already be over; the webhook wraps up
+            log.exception("cancel failed for %s", self.id)
+
+    # ------------------------------------------------------------- wrap-up
+
+    async def finish(self, call: dict[str, Any]) -> None:
+        if self._finishing:
+            return
+        self._finishing = True
+        try:
+            await self._wrap_up(call)
+        except Exception:  # noqa: BLE001
+            log.exception("wrap-up failed for %s", self.id)
+        finally:
+            await self._cleanup()
+
+    async def _wrap_up(self, call: dict[str, Any]) -> None:
+        from backend.calls import _read_back_reference
+
+        s = self.session
+        if not self.transcript and call.get("transcript"):
+            for t in call["transcript"]:  # webhook turns lost: rebuild from the record
+                text = audit.redact(str(t.get("text") or ""))
+                if text and t.get("role") in ("user", "assistant"):
+                    who = "agent" if t["role"] == "assistant" else "remote"
+                    self.transcript.append(f"{who}: {text}")
+        failed = call.get("status") == "failed" and not self.transcript
+        reason = str(call.get("end_reason") or "")
+        await self._go(S.FAILED if failed else S.ENDED, reason or "call ended")
+        s.ended_at = utcnow()
+        s.minutes_saved = round(max(0.0, (s.ended_at - s.started_at).total_seconds()) / 60, 1)
+        s.outcome = self.outcome or END_REASONS.get(reason) or reason.replace("_", " ") or None
+        s.reference_number = self.reference or _read_back_reference(self.transcript)
+        summary = audit.redact(str(call.get("summary") or "")) or s.outcome or "The call ended."
+        if self.persist:
+            await self._save_session()
+            # Kept for the summary screen (GET /calls/{id}); already redacted.
+            await self._event(
+                "call.ended",
+                {"outcome": s.outcome, "minutes_saved": s.minutes_saved, "summary": summary},
+            )
+        data = {
+            "summary": summary,
+            "outcome": s.outcome,
+            "reference_number": s.reference_number,
+            "minutes_saved": s.minutes_saved,
+            "state": s.state.value,
+        }
+        hub.publish(LiveMessage(type="summary", session_id=self.id, data={"text": summary, **data}))
+        hub.publish(LiveMessage(type="ended", session_id=self.id, data=data))
+        with contextlib.suppress(Exception):
+            await self.user.alert(
+                s.user_id,
+                "Call done",
+                summary,
+                category="CALL_ENDED",
+                data={"session_id": self.id, "haptic": True},
+            )
+
+    async def _cleanup(self) -> None:
+        from backend import calls  # calls imports this module; import at use
+
+        if self.call_id is not None:
+            # Rule 8: don't leave the transcript and recording on Cartesia's side.
+            with contextlib.suppress(Exception):
+                await self.api.delete_call_data(self.call_id)
+            by_call_id.pop(self.call_id, None)
+        audit.forget_session(self.id)
+        calls.registry.pop(self.id, None)
+        self._finished.set()
+        for task in list(self._tasks):
+            if task is not asyncio.current_task():
+                task.cancel()
+        with contextlib.suppress(Exception):
+            await self.api.aclose()
+
+    async def _fail(self, reason: str) -> None:
+        with contextlib.suppress(st.IllegalTransition):
+            await st.transition(
+                self.session, S.FAILED, reason=reason, recorder=self.recorder, actor="system"
+            )
+        self.session.outcome = reason
+        self.session.ended_at = utcnow()
+        if self.persist:
+            await self._save_session()
+        data = {"summary": reason, "outcome": reason, "state": S.FAILED.value}
+        hub.publish(LiveMessage(type="ended", session_id=self.id, data=data))
+        await self._cleanup()
+
+    async def _save_session(self) -> None:
+        from backend.db.models import CallSessionRow
+        from backend.db.session import sessionmaker
+
+        s = self.session
+        try:
+            async with sessionmaker()() as db:
+                row = await db.get(CallSessionRow, s.id)
+                if row is None:
+                    return
+                row.state = s.state
+                row.ended_at = s.ended_at
+                row.outcome = audit.redact(s.outcome) if s.outcome else None
+                row.reference_number = s.reference_number
+                row.minutes_saved = s.minutes_saved
+                await audit.append(
+                    db,
+                    actor="system",
+                    action="call.end",
+                    subject=s.id,
+                    reason=f"call finished in {s.state.value}",
+                    diff={"outcome": row.outcome, "minutes_saved": s.minutes_saved},
+                )
+                await db.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("could not save session %s", s.id)
+
+    # ------------------------------------------------------------- helpers
+
+    async def _go(self, target: CallState, reason: str) -> None:
+        """Walk to `target` through legal states (e.g. menu -> person passes through
+        HUMAN_SUSPECTED and HUMAN_CONFIRMED, so the timeline reads like the engine's)."""
+        path = [target]
+        if target is S.IN_CONVERSATION and self.session.state in PRE_PERSON:
+            path = [S.HUMAN_SUSPECTED, S.HUMAN_CONFIRMED, S.IN_CONVERSATION]
+        elif target in (S.MENU, S.RECORDED_MESSAGE) and self.session.state in (
+            S.IN_CONVERSATION,
+            S.WAITING_ON_USER,
+        ):
+            path = [S.HOLD, target]
+        for state in path:
+            try:
+                await st.transition(
+                    self.session, state, reason=reason, recorder=self.recorder, actor="agent"
+                )
+            except st.IllegalTransition:
+                return
+
+    async def _event(
+        self, kind: str, detail: dict[str, Any], *, audit_action: str | None = None
+    ) -> None:
+        try:
+            await self.recorder.event(
+                CallEvent(
+                    session_id=self.id,
+                    kind=kind,
+                    from_state=self.session.state,
+                    to_state=self.session.state,
+                    detail=detail,
+                ),
+                audit_action=audit_action,
+            )
+        except Exception:  # noqa: BLE001 - the timeline is best effort
+            log.exception("could not record %s", kind)
+
+    async def _audit(self, action: str, reason: str, *, subject: str | None = None) -> None:
+        if not self.persist:
+            return
+        with contextlib.suppress(Exception):
+            await self.audit_sink(
+                actor="agent", action=action, subject=subject or self.id, reason=reason
+            )
+
+    async def _deny(self, action: str, reason: str) -> None:
+        await self._event("guard_denied", {"action": action, "reason": reason})
+        if self.persist:
+            with contextlib.suppress(Exception):
+                await self.audit_sink(
+                    actor="guard",
+                    action=f"guard.{action}",
+                    subject=self.id,
+                    allowed=False,
+                    reason=reason,
+                )
+
+    def _spawn(self, coro: Any) -> asyncio.Task[Any]:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+
+def _dial_failure(e: BaseException) -> str:
+    text = str(e).lower()
+    if "402" in text or "credit" in text or "quota" in text:
+        return "Cartesia is out of credits (or out of phone numbers). The call was not made."
+    if "public_base_url" in text:
+        return "The server's public URL isn't set (PUBLIC_BASE_URL). The call was not made."
+    if "e.164" in text or "to_number" in text or "invalid" in text:
+        return "That phone number doesn't look valid. Use a US number like +14155551234."
+    return "The call could not be placed. Try again in a moment."

@@ -175,7 +175,7 @@ async def _tts_server(fake: FakeTTSServer):
     return server, f"ws://127.0.0.1:{port}/tts/websocket"
 
 
-async def test_cartesia_tts_streams_twilio_frames_and_measures_latency() -> None:
+async def test_cartesia_tts_streams_mulaw_frames_and_measures_latency() -> None:
     fake = FakeTTSServer()
     server, url = await _tts_server(fake)
     try:

@@ -24,6 +24,7 @@ from backend.agent.prompts import build_system_prompt
 from backend.agent.tools import (
     ANSWER_PLACEHOLDER,
     HOLDING_LINE,
+    SAID,
     STILL_WAITING_LINE,
     TOOL_DEFINITIONS,
 )
@@ -46,7 +47,12 @@ from backend.engine.call_engine import (
     CALLBACK_DECLINE_GOAL,
     TRANSFER_RE,
 )
-from backend.engine.menu import MenuAction, MenuNavigator, parse_menu_options
+from backend.engine.menu import (
+    MenuAction,
+    MenuNavigator,
+    decline_callback_options,
+    parse_menu_options,
+)
 from evals.driver import Observation, UserEvent
 
 S = CallState
@@ -54,6 +60,7 @@ PRE_HUMAN = frozenset({S.DIALING, S.MENU, S.HOLD, S.RECORDED_MESSAGE, S.CALLBACK
 HUMAN_THRESHOLD = 0.8
 STATE_THRESHOLD = 0.6
 MAX_TOOL_ROUNDS = 4
+MAX_DENIAL_RETRIES = 2  # per rep turn, so a stubborn model can't loop
 
 _LABEL_TO_STATE = {
     "menu": S.MENU,
@@ -77,6 +84,7 @@ class ProductDriver:
         self.relays: list[tuple[str, str]] = []  # (template, relay_as) per pending ask_user
         self.last_remote = ""
         self.heard_during_takeover: list[str] = []
+        self.retries_left = MAX_DENIAL_RETRIES
 
     # -- protocol --------------------------------------------------------------
 
@@ -94,6 +102,7 @@ class ProductDriver:
             return []
         text = obs.transcript.text
         self.last_remote = text
+        self.retries_left = MAX_DENIAL_RETRIES
         if self.state is S.TAKEOVER:
             self.heard_during_takeover.append(audit.redact(text))
             return []  # rule 6: the user is typing
@@ -104,9 +113,21 @@ class ProductDriver:
             return []
         if self.state is S.HUMAN_SUSPECTED:
             self.state = S.IN_CONVERSATION
-        if self.state is S.WAITING_ON_USER:
-            return []  # the holding line is out; wait for the user's answer
+            self._add_user(
+                f'[System] You already said to the rep: "{self.greeting}". '
+                "Do not repeat the AI disclosure."
+            )
         self._add_user(f"Rep: {audit.redact(text)}")
+        if self.state is S.WAITING_ON_USER:
+            return []  # heard, but the holding line is out; wait for the user's answer
+        return await self._claude()
+
+    async def on_denied(self, kind: str, reason: str) -> list[AgentAction]:
+        """The guard blocked an action: tell Claude, as the product's tool result does."""
+        if self.retries_left <= 0 or self.state is not S.IN_CONVERSATION:
+            return []
+        self.retries_left -= 1
+        self._add_user(f"[System] Your {kind} was blocked: {reason}")
         return await self._claude()
 
     async def user_event(self, ev: UserEvent) -> list[AgentAction]:
@@ -162,7 +183,7 @@ class ProductDriver:
 
     async def _decline_callback(self, text: str) -> list[AgentAction]:
         # Evals have no agent number to give out, so stay on hold (never the user's number).
-        options = parse_menu_options(text)
+        options = decline_callback_options(parse_menu_options(text))
         self.state = S.HOLD
         if not options:
             return []
@@ -207,7 +228,8 @@ class ProductDriver:
 
     def _tool(self, name: str, args: dict[str, Any]) -> tuple[list[AgentAction], str, bool]:
         if name == "say":
-            return [SayAction(text=str(args.get("text", "")))], "said", False
+            text = str(args.get("text", ""))
+            return [SayAction(text=text)], SAID, "?" in text  # as the product: asked, so wait
         if name == "press_digits":
             return [PressDigitsAction(digits=str(args.get("digits", "")))], "pressed", False
         if name == "ask_user":

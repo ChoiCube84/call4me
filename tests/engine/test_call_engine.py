@@ -101,10 +101,10 @@ async def test_partial_menu_waits_for_settle() -> None:
     assert h.telephony.digits == []  # still speaking
 
 
-async def test_saved_menu_path_is_replayed() -> None:
+async def test_saved_menu_path_is_replayed_when_enabled() -> None:
     store = MemoryMenuPathStore()
     await store.save_success("Fake Support Line", ["0"])
-    h = Harness(menu_paths=store)
+    h = Harness(menu_paths=store, config=EngineConfig(replay_menu_paths=True))
     await h.engine.start()
     await h.hear(MENU_TEXT)
     await h.settle()
@@ -141,10 +141,21 @@ async def test_low_confidence_state_check_does_not_move() -> None:
 async def test_human_below_threshold_is_not_greeted() -> None:
     h = Harness()
     await to_hold(h)
-    h.jev.script(jev_checks.STATE_CHECK, "human", 0.7)
+    h.jev.script(jev_checks.STATE_CHECK, "human", 0.5)
     await h.hear("Uh, hello?")
     assert h.engine.state is S.HOLD
     assert h.telephony.audio == []
+
+
+async def test_two_moderate_human_checks_in_a_row_are_greeted() -> None:
+    h = Harness()
+    await to_hold(h)
+    h.jev.script(jev_checks.STATE_CHECK, "human", 0.5)
+    await h.hear("This is Alex in billing.")
+    assert h.engine.state is S.HOLD
+    h.jev.script(jev_checks.STATE_CHECK, "human", 0.47)
+    await h.hear("How can I help you today?")
+    assert h.engine.state is S.HUMAN_SUSPECTED
 
 
 async def test_false_human_returns_to_hold_and_stops_greeting() -> None:
@@ -152,6 +163,7 @@ async def test_false_human_returns_to_hold_and_stops_greeting() -> None:
     await to_hold(h)
     await h.hear(REP_HELLO)
     assert h.engine.state is S.HUMAN_SUSPECTED
+    await h.flush()  # the recording carries on after our greeting
     await h.hear("Your call is important to us. Please continue to hold.")
     assert h.engine.state is S.HOLD
     assert h.path[-2:] == ["HUMAN_SUSPECTED", "HOLD"]
@@ -318,7 +330,7 @@ async def test_voicemail_hangs_up_and_notifies() -> None:
     assert any(m.get("title") == "Reached voicemail" for m in h.notifier.sent)
 
 
-async def test_remote_hangup_and_twilio_status() -> None:
+async def test_remote_hangup_and_line_status() -> None:
     h = Harness()
     await to_hold(h)
     await h.engine.on_call_status("completed")
@@ -392,3 +404,36 @@ async def test_db_recorder_end_to_end_audit_and_live_channel(db) -> None:
         live.append(q.get_nowait())
     assert [m.data["to"] for m in live if m.type == "state"] == ["MENU", "HOLD"]
     assert any(m.type == "event" and m.data["kind"] == "jev_decision" for m in live)
+
+
+async def test_rep_talking_over_greeting_is_not_judged_as_reply() -> None:
+    """STT splits "This is Alex. How can I help?"; the second half lands during our
+    greeting and must not be scored as a recording ignoring us."""
+    h = Harness()
+    await to_hold(h)
+    await h.hear(REP_HELLO)
+    assert h.engine.state is S.HUMAN_SUSPECTED
+    await h.hear("How can I help you today?")  # greeting still playing
+    assert h.engine.state is S.HUMAN_SUSPECTED
+    assert not [c for c in h.jev.calls if c[0] == jev_checks.HUMAN_CONFIRMATION]
+    await h.flush()
+    await h.hear("Sure, I can look into that for you.")
+    assert h.engine.state is S.IN_CONVERSATION
+
+
+async def test_live_person_check_catches_rep_saying_hello_on_hold() -> None:
+    h = Harness()
+    await to_hold(h)
+    h.jev.script(jev_checks.LIVE_PERSON, "live_person", 0.63)
+    h.jev.script(jev_checks.STATE_CHECK, "hold_music", 0.79)  # the 8-way check misses it
+    await h.hear("Hello? Are you there?")
+    assert h.engine.state is S.HUMAN_SUSPECTED
+
+
+async def test_live_person_check_ignores_hold_announcement() -> None:
+    h = Harness()
+    await to_hold(h)
+    h.jev.script(jev_checks.LIVE_PERSON, "automated", 0.99)
+    h.jev.script(jev_checks.STATE_CHECK, "hold_music", 0.8)
+    await h.hear("Your call is important to us. Please continue to hold.")
+    assert h.engine.state is S.HOLD

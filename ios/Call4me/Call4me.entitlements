@@ -2,9 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>aps-environment</key>
-	<string>development</string>
-	<key>com.apple.developer.usernotifications.time-sensitive</key>
-	<true/>
+	<!-- Empty so a free (Personal Team) Apple ID can sign the app. With a paid account,
+	     add aps-environment and com.apple.developer.usernotifications.time-sensitive
+	     back for push alerts (see ios/README.md). -->
 </dict>
 </plist>

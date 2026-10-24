@@ -4,9 +4,10 @@
  * same-origin path ("../calls" from /dashboard/ → /calls). The WebSocket URL is
  * built from `location` for the same reason (ws:// locally, wss:// on Azure).
  *
- * Privacy (CLAUDE.md section 2): ask_user answers are read from the input,
- * sent once, and the input is cleared. They are never kept in a variable,
- * localStorage, the URL, or the console.
+ * Privacy (CLAUDE.md section 2): ask_user answers and pre-call info values are
+ * read from the inputs, sent once, and the inputs are cleared. They are never
+ * kept in localStorage, the URL, or the console. (Company, number, rules and
+ * the AI introduction are remembered in localStorage for the next call.)
  */
 "use strict";
 
@@ -25,7 +26,25 @@ const api = (path) => API_ROOT + path;
 
 function wsUrl(path) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}${API_ROOT}${path}`;
+  // Browsers can't set headers on WebSockets, so the access code rides in the URL.
+  const token = getToken();
+  const q = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${proto}//${location.host}${API_ROOT}${path}${q}`;
+}
+
+// Access code: the server's API_TOKEN (servers without one ignore it). It is a
+// shared server password, not user data, so it is remembered in localStorage.
+const TOKEN_KEY = "call4me.token";
+
+function getToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
+}
+
+function askForToken() {
+  const entered = window.prompt("Enter the call4me access code:");
+  if (!entered || !entered.trim()) return false;
+  try { localStorage.setItem(TOKEN_KEY, entered.trim()); } catch { /* private mode */ }
+  return true;
 }
 
 const $ = (id) => document.getElementById(id);
@@ -46,13 +65,18 @@ class HttpError extends Error {
   }
 }
 
-async function http(method, path, body) {
+async function http(method, path, body, retried = false) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
+  const token = getToken();
+  if (token) opts.headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(api(path), opts);
+  if (res.status === 401 && !retried && askForToken()) {
+    return http(method, path, body, true);
+  }
   let data = null;
   const text = await res.text();
   if (text) {
@@ -1081,18 +1105,129 @@ $("company").addEventListener("input", () => {
 const DEFAULT_DISCLOSURE =
   "Hi, I'm an AI assistant calling on behalf of my client, who is Deaf. " +
   "They are following this call by text and can join if needed.";
-$("disclosure").value = DEFAULT_DISCLOSURE;
 
-// The section 19 demo script, one click away during the pitch.
+// Settings worth keeping between calls (never the info values: those live only in
+// the inputs until the call starts, then the inputs are cleared).
+const PREFS_KEY = "call4me.prefs";
+const PREF_FIELDS = ["company", "phone", "disclosure", "limits-notes", "max-hold", "max-spend"];
+const PREF_CHECKS = ["allow-plan", "allow-cancel"];
+
+function loadPrefs() {
+  let prefs = {};
+  try { prefs = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"); } catch { prefs = {}; }
+  for (const id of PREF_FIELDS) if (prefs[id] !== undefined) $(id).value = prefs[id];
+  for (const id of PREF_CHECKS) if (prefs[id] !== undefined) $(id).checked = !!prefs[id];
+  if (!$("disclosure").value) $("disclosure").value = DEFAULT_DISCLOSURE;
+}
+
+function savePrefs() {
+  const prefs = {};
+  for (const id of PREF_FIELDS) prefs[id] = $(id).value;
+  for (const id of PREF_CHECKS) prefs[id] = $(id).checked;
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* private mode */ }
+}
+
+// ---- info the agent can share (order number, email, ...) ----
+
+function addInfoRow(label = "", value = "") {
+  const row = el("div", "info-row");
+  const name = el("input");
+  name.placeholder = "What it is";
+  name.maxLength = 40;
+  name.value = label;
+  name.className = "info-label";
+  const val = el("input");
+  val.placeholder = "Value";
+  val.maxLength = 120;
+  val.value = value;
+  val.className = "info-value secret";
+  val.autocomplete = "off";
+  val.spellcheck = false;
+  const del = el("button", "ghost");
+  del.type = "button";
+  del.textContent = "×";
+  del.title = "Remove";
+  del.setAttribute("aria-label", "Remove");
+  del.addEventListener("click", () => row.remove());
+  row.append(name, val, del);
+  $("info-rows").appendChild(row);
+  (label ? val : name).focus();
+  return row;
+}
+
+function readInfo() {
+  const out = [];
+  for (const row of $("info-rows").querySelectorAll(".info-row")) {
+    const label = row.querySelector(".info-label").value.trim();
+    const value = row.querySelector(".info-value").value.trim();
+    if (label && value) out.push({ label, value });
+  }
+  return out;
+}
+
+function clearInfo() {
+  $("info-rows").textContent = "";
+}
+
+for (const chip of document.querySelectorAll("#info-chips .chip")) {
+  chip.addEventListener("click", () => {
+    const label = chip.dataset.label;
+    // One row per label: jump to it instead of adding a duplicate.
+    for (const row of $("info-rows").querySelectorAll(".info-row")) {
+      if (label && row.querySelector(".info-label").value.trim() === label) {
+        row.querySelector(".info-value").focus();
+        return;
+      }
+    }
+    addInfoRow(label);
+  });
+}
+
+for (const chip of document.querySelectorAll("#goal-chips .chip")) {
+  chip.addEventListener("click", () => {
+    $("goal").value = chip.dataset.goal;
+    $("goal").focus();
+    checkGoal();
+  });
+}
+
+/** Numbers in the goal are stored with the call; nudge them into Info instead. */
+function checkGoal() {
+  $("goal-hint").hidden = !/\d[\d -]{4,}\d/.test($("goal").value);
+}
+$("goal").addEventListener("input", checkGoal);
+
+// Ctrl/Cmd+Enter starts the call from anywhere in the form.
+$("start-form").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("start-form").requestSubmit();
+});
+
+/** FastAPI 422s come back as a list of {msg}; show just the message. */
+function friendlyError(err) {
+  try {
+    const detail = JSON.parse(err.detail);
+    if (Array.isArray(detail)) {
+      return detail.map((d) => String(d.msg || d).replace(/^Value error, /, "")).join(" ");
+    }
+    return String(detail);
+  } catch {
+    return err.message;
+  }
+}
+
+// The section 19 demo, one click away during the pitch.
 $("preset").addEventListener("click", async () => {
   await searchCompanies("");
-  if (companies[0]) {
-    $("company").value = companies[0].name;
+  const amazon = companies.find((c) => /amazon/i.test(c.name)) || companies[0];
+  if (amazon) {
+    $("company").value = amazon.name;
     fillPhoneFromCompany();
   }
-  $("goal").value = "Remove the $40 late fee from my last bill.";
-  $("limits-notes").value = "No plan changes. Do not agree to any new charges.";
-  $("max-hold").value = 60;
+  $("goal").value = "Get a refund for wireless headphones that arrived damaged.";
+  checkGoal();
+  clearInfo();
+  addInfoRow("Order number", "112-4567890-1234567");
+  $("limits-notes").value = "No new charges or subscriptions.";
   $("max-spend").value = 0;
   $("allow-plan").checked = false;
   $("allow-cancel").checked = false;
@@ -1113,19 +1248,25 @@ $("start-form").addEventListener("submit", async (e) => {
       allow_plan_changes: $("allow-plan").checked,
       allow_cancellation: $("allow-cancel").checked,
     },
-    disclosure_text: $("disclosure").value.trim(),
+    disclosure_text: $("disclosure").value.trim() || DEFAULT_DISCLOSURE,
+    known_info: readInfo(),
   };
   setMsg(msg, "Starting…");
   try {
     const session = await http("POST", "/calls", body);
-    setMsg(msg, `Started call ${session.id.slice(0, 8)}…`, "ok");
+    body.known_info = null; // drop our only other reference to the values
+    clearInfo();
+    savePrefs();
+    setMsg(msg, `Calling ${session.company}…`, "ok");
     await joinCall(session.id);
     loadRecentCalls();
     document.getElementById("live").scrollIntoView();
   } catch (err) {
-    setMsg(msg, `Could not start: ${err.message}`, "err");
+    setMsg(msg, `Could not start: ${friendlyError(err)}`, "err");
   }
 });
+
+loadPrefs();
 
 // --------------------------------------------------------------------------
 // Eval metrics: GET /metrics (latest evals/results report)

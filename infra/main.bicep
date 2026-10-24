@@ -23,11 +23,12 @@ param postgresAdminPassword string
 param deployerPrincipalId string = ''
 
 // ---- Non-secret app settings (passed as plain env vars) ----
-param twilioAccountSid string = ''
-param twilioAgentNumber string = ''
-param twilioFakelineNumber string = ''
-param userVerifiedCallerId string = ''
+@description('Who places calls: cartesia (a Cartesia agent dials real numbers) or phone (fake line; the /phone page plays the rep).')
+@allowed(['cartesia', 'phone'])
+param telephony string = 'cartesia'
 param cartesiaVoiceId string = ''
+@description('Model the Cartesia agent runs (GET https://api.cartesia.ai/v1/agents/models).')
+param cartesiaAgentModel string = 'claude-haiku-5.5'
 param azureFoundryEndpoint string = ''
 param apnsKeyId string = ''
 param apnsTeamId string = ''
@@ -122,12 +123,11 @@ resource kvSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   }
 }
 
-// Secrets whose values this template knows. The rest (twilio-auth-token,
-// cartesia-api-key, typesafe-api-key, anthropic-api-key, azure-foundry-key,
-// apns-auth-key) are set by deploy.sh from your local .env; they are not
-// created here with placeholder values because config.py would load a
-// placeholder as a real value, and a redeploy would overwrite real secrets.
-// Names use dashes: config.py maps `twilio_auth_token` -> `twilio-auth-token`.
+// Secrets whose values this template knows. The rest (api-token, cartesia-api-key,
+// typesafe-api-key, anthropic-api-key, azure-foundry-key, apns-auth-key) are set by
+// deploy.sh; they are not created here with placeholder values because config.py
+// would load a placeholder as a real value, and a redeploy would overwrite real
+// secrets. Names use dashes: config.py maps `cartesia_api_key` -> `cartesia-api-key`.
 resource databaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: vault
   name: 'database-url'
@@ -217,7 +217,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: env.id
     configuration: {
       activeRevisionsMode: 'Single'
-      // HTTP/1.1 ingress carries WebSockets (/media, /calls/{id}/live) with no extra settings.
+      // HTTP/1.1 ingress carries the WebSockets (/calls/{id}/live, /phone/ws) as is.
       ingress: {
         external: true
         targetPort: targetPort
@@ -246,11 +246,9 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
             { name: 'PUBLIC_BASE_URL', value: 'https://${appFqdn}' }
             { name: 'USE_MOCKS', value: 'false' }
-            { name: 'TWILIO_ACCOUNT_SID', value: twilioAccountSid }
-            { name: 'TWILIO_AGENT_NUMBER', value: twilioAgentNumber }
-            { name: 'TWILIO_FAKELINE_NUMBER', value: twilioFakelineNumber }
-            { name: 'USER_VERIFIED_CALLER_ID', value: userVerifiedCallerId }
+            { name: 'TELEPHONY', value: telephony }
             { name: 'CARTESIA_VOICE_ID', value: cartesiaVoiceId }
+            { name: 'CARTESIA_AGENT_MODEL', value: cartesiaAgentModel }
             { name: 'AZURE_FOUNDRY_ENDPOINT', value: azureFoundryEndpoint }
             { name: 'APNS_KEY_ID', value: apnsKeyId }
             { name: 'APNS_TEAM_ID', value: apnsTeamId }
@@ -273,8 +271,9 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           ] : []
         }
       ]
-      // Always one warm replica: no cold start when Twilio connects, and in-memory
-      // call state (LiveHub, AnswerBroker) assumes a single replica.
+      // Always one warm replica: Cartesia's webhooks and the app's live socket must
+      // reach the process that runs the call, and in-memory call state (LiveHub,
+      // AnswerBroker) assumes a single replica.
       scale: {
         minReplicas: 1
         maxReplicas: 1

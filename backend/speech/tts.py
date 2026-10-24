@@ -2,7 +2,7 @@
 
 `CartesiaTTSClient` holds one persistent WebSocket to Cartesia (no handshake
 per utterance) and multiplexes requests by `context_id`. It asks Cartesia for
-raw 8 kHz mu-law directly, so audio goes to Twilio with no transcoding; chunks
+raw 8 kHz mu-law directly, so audio goes to the phone line with no transcoding; chunks
 are re-cut into exact 20 ms (160-byte) frames as they stream in.
 
 Latency: time-to-first-audio is measured per utterance, logged, and kept in

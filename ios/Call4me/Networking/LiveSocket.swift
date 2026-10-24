@@ -35,6 +35,10 @@ final class LiveSocket {
                                         resolvingAgainstBaseURL: false)
         else { return nil }
         comps.scheme = (comps.scheme == "https") ? "wss" : "ws"
+        // WebSockets carry the access code in the URL (the server accepts either form).
+        if let token = settings.token {
+            comps.queryItems = [URLQueryItem(name: "token", value: token)]
+        }
         return comps.url
     }
 

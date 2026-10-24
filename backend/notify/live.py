@@ -1,6 +1,8 @@
 """In-process channels between the backend and the user.
 
-- `LiveHub`: fan-out of `LiveMessage`s to `WS /calls/{id}/live` subscribers.
+- `LiveHub`: fan-out of `LiveMessage`s to `WS /calls/{id}/live` subscribers, with a
+  short in-memory backlog per call so a reconnecting phone can rebuild its screen
+  (messages are redacted before they are kept; nothing is written to disk).
 - `AnswerBroker`: hands an `ask_user` answer from `POST /requests/{id}/answer`
   to whoever is awaiting it (the conversation agent). The answer is passed in
   memory only and never stored.
@@ -11,18 +13,26 @@ Single-replica for the hackathon; swap for Redis pub/sub if we scale out.
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+from collections import OrderedDict, defaultdict, deque
 
 from backend.audit.log import redact
 from backend.contracts import LiveMessage
+
+BACKLOG_PER_CALL = 400
+BACKLOG_CALLS = 50  # oldest calls' backlogs are dropped first
 
 
 class LiveHub:
     def __init__(self) -> None:
         self._subs: dict[str, set[asyncio.Queue[LiveMessage]]] = defaultdict(set)
+        self._backlog: OrderedDict[str, deque[LiveMessage]] = OrderedDict()
 
-    def subscribe(self, session_id: str) -> asyncio.Queue[LiveMessage]:
-        q: asyncio.Queue[LiveMessage] = asyncio.Queue(maxsize=500)
+    def subscribe(self, session_id: str, *, replay: bool = False) -> asyncio.Queue[LiveMessage]:
+        """`replay`: the queue starts with the call's recent messages (reconnects)."""
+        q: asyncio.Queue[LiveMessage] = asyncio.Queue(maxsize=BACKLOG_PER_CALL + 100)
+        if replay:
+            for msg in self._backlog.get(session_id, ()):
+                q.put_nowait(msg)
         self._subs[session_id].add(q)
         return q
 
@@ -33,6 +43,12 @@ class LiveHub:
 
     def publish(self, msg: LiveMessage) -> None:
         msg = msg.model_copy(update={"data": redact(msg.data)})
+        log = self._backlog.get(msg.session_id)
+        if log is None:
+            log = self._backlog[msg.session_id] = deque(maxlen=BACKLOG_PER_CALL)
+            while len(self._backlog) > BACKLOG_CALLS:
+                self._backlog.popitem(last=False)
+        log.append(msg)
         for q in list(self._subs.get(msg.session_id, ())):
             if q.full():  # slow client: drop its oldest message rather than block the call
                 q.get_nowait()

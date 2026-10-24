@@ -54,9 +54,9 @@ async def run_call(tel: MockTelephonyClient, react) -> tuple[list[MockSegment], 
     return seen, frames
 
 
-async def test_full_call_billing_path_to_rep_with_ask_user() -> None:
+async def test_full_call_refunds_path_to_rep_with_ask_user() -> None:
     tel = mock()
-    pressed = {"menu:main": "2", "menu:billing": "2"}
+    pressed = {"menu:main": "2", "menu:refunds": "2"}
 
     async def agent(tel, sid, seg: MockSegment) -> None:
         if seg.key in pressed:
@@ -66,7 +66,7 @@ async def test_full_call_billing_path_to_rep_with_ask_user() -> None:
 
     seen, frames = await run_call(tel, agent)
     keys = [s.key for s in seen]
-    assert keys[:3] == ["welcome", "menu:main", "menu:billing"]
+    assert keys[:3] == ["welcome", "menu:main", "menu:refunds"]
     assert "hold:music" in keys and "queue:intro" in keys
     rep_keys = [k for k in keys if k.startswith("rep:")]
     assert rep_keys == ["rep:0", "rep:1", "rep:1:wait", "rep:2", "rep:3", "rep:4"]

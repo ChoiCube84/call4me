@@ -1,88 +1,98 @@
 # Deploying call4me to Azure
 
-One script stands up the backend on **Azure Container Apps**, with
-**PostgreSQL Flexible Server**, **Key Vault**, and **Application Insights**
-(CLAUDE.md section 15).
+`deploy.sh` stands up the backend on **Azure Container Apps**, with **PostgreSQL
+Flexible Server**, **Key Vault**, and **Application Insights** (CLAUDE.md section 15).
+
+```bash
+az login
+./infra/deploy.sh                                   # call4me-rg in northcentralus
+RESOURCE_GROUP=x LOCATION=swedencentral ./infra/deploy.sh
+```
+
+Prerequisites: Azure CLI (includes Bicep), `openssl`, `python3`, `curl`, and a filled-in
+`.env` (template: `.env.example`). Docker is used only if `az acr build` is blocked (it is on
+Azure for Students). The image build also builds the web app (`web/`) in a Node stage.
 
 ## What gets created (`main.bicep`)
 
 | Resource | Notes |
 |---|---|
-| Log Analytics workspace + Application Insights | Logs, traces, and metrics. The connection string is written to Key Vault. |
-| Azure Container Registry (Basic) | Images are built in the cloud with `az acr build` (no local Docker needed). |
-| User-assigned managed identity | `AcrPull` on the registry and `Key Vault Secrets User` on the vault. |
-| Key Vault (RBAC mode) | All secrets. The app loads them at startup (`backend/config.py`). |
-| PostgreSQL Flexible Server (B1ms, v16) | Database `call4me`. Firewall rule "allow Azure services". |
-| Container Apps environment + app | External ingress on port 8000, `minReplicas: 1` (no cold starts). |
+| Log Analytics workspace + Application Insights | Logs, traces, metrics (30-day retention). Log records are redacted before export (`backend/telemetry.py`). |
+| Container Registry (Basic) | Holds the app image. |
+| User-assigned managed identity | `AcrPull` on the registry, `Key Vault Secrets User` on the vault. No passwords between Azure services except Postgres. |
+| Key Vault (RBAC mode, soft delete) | All secrets. The app reads them at startup with its managed identity (`backend/config.py`). |
+| PostgreSQL Flexible Server (Burstable B1ms, v16) | Database `call4me`, TLS required, firewall "allow Azure services". |
+| Container Apps environment + app | External HTTPS ingress on port 8000, `/health` liveness and readiness probes, exactly 1 replica. |
 
-WebSockets (`/media` for Twilio, `/calls/{id}/live` for the app) work over the
-default HTTP/1.1 ingress with `transport: auto`; nothing extra to turn on.
-`maxReplicas` is also 1 because live-call state (`LiveHub`, `AnswerBroker`) is
-in process memory.
+**Why exactly one replica:** Cartesia's webhooks, the app's live WebSocket, and the
+call's in-memory state (`LiveHub`, `AnswerBroker`, the Cartesia call registry) must all
+reach the same process. `minReplicas: 1` also means no cold start when a call starts.
+Scaling out would need that state in a shared store (e.g. Azure Cache for Redis)
+first.
 
-The container gets these env vars: `AZURE_KEY_VAULT_URL`, `AZURE_CLIENT_ID`
-(so `DefaultAzureCredential` uses the user-assigned identity), `PUBLIC_BASE_URL`
-(the app's own `https://` FQDN), `USE_MOCKS=false`, and the non-secret settings
-(`TWILIO_ACCOUNT_SID`, numbers, `CARTESIA_VOICE_ID`, `APNS_KEY_ID`,
-`APNS_TEAM_ID`, `APNS_TOPIC`, `APNS_USE_SANDBOX`, `AZURE_FOUNDRY_ENDPOINT`).
+The container gets these env vars: `AZURE_KEY_VAULT_URL`, `AZURE_CLIENT_ID` (so
+`DefaultAzureCredential` picks the managed identity), `PUBLIC_BASE_URL` (its own
+`https://` address, which Cartesia calls back), `USE_MOCKS=false`, `TELEPHONY` (default
+`cartesia`), `CARTESIA_VOICE_ID`, `CARTESIA_AGENT_MODEL`, and the optional
+`AZURE_FOUNDRY_ENDPOINT` / `APNS_*` settings.
 
-## Secrets in Key Vault
+## Secrets (Key Vault)
 
-`config.py` reads each secret field from a Key Vault secret with the same name,
-using dashes (`twilio_auth_token` -> `twilio-auth-token`).
+`config.py` reads each secret setting from the Key Vault secret with the same name in
+dashes (`cartesia_api_key` -> `cartesia-api-key`). Values never go on a command line or
+into logs: `deploy.sh` writes them with `az keyvault secret set --file`.
 
 | Secret | Set by |
 |---|---|
-| `database-url` | Bicep (built from the server FQDN and admin password, `?ssl=require`) |
-| `applicationinsights-connection-string` | Bicep |
-| `twilio-auth-token`, `cartesia-api-key`, `typesafe-api-key`, `anthropic-api-key`, `azure-foundry-key` | `deploy.sh`, from your `.env` |
-| `apns-auth-key` | `deploy.sh`, contents of the file at `APNS_AUTH_KEY_PATH` |
-| `postgres-admin-password` | `deploy.sh` (reused on redeploys so the password doesn't rotate) |
+| `database-url`, `applicationinsights-connection-string` | Bicep |
+| `cartesia-api-key`, `typesafe-api-key`, `anthropic-api-key`, `azure-foundry-key` | `deploy.sh`, from `.env` |
+| `api-token` | `deploy.sh`: generated on the first deploy, then reused |
+| `postgres-admin-password` | `deploy.sh`: generated on the first deploy, then reused |
+| `apns-auth-key` | `deploy.sh`, from the file at `APNS_AUTH_KEY_PATH` (paid Apple account only) |
 
-Bicep doesn't create placeholder values for the `.env` secrets: the app would
-load a placeholder as if it were real, and every redeploy would overwrite the
-real value. Missing secrets just fall back to env (empty).
+## What the script does
 
-## Deploy
+1. Checks `az login`. Reads the subscription's allowed regions (Azure for Students allows
+   only `northcentralus`, `swedencentral`, `belgiumcentral`, `denmarkeast`,
+   `norwayeast`) and stops early if `LOCATION` isn't one of them.
+2. Registers the resource providers it needs and creates the resource group.
+3. Deploys the infrastructure. The first time, it uses a public placeholder image,
+   because the registry doesn't exist yet.
+4. Writes the secrets to Key Vault.
+5. Builds the image with `az acr build`. Free-credit subscriptions sometimes block ACR
+   Tasks; then it builds locally with `docker buildx --platform linux/amd64` and pushes.
+   Then it rolls the app onto the new image.
+6. Waits for `/health` and prints the web app URL (`/`), the judges view (`/dashboard/`),
+   and how to read the access code and the logs.
 
-Prerequisites: Azure CLI (`az`, includes Bicep), `openssl`, `python3`, and
-`az login` to the subscription with the hackathon credits.
-
-```bash
-cp .env.example .env    # fill in real values (never commit it)
-RESOURCE_GROUP=call4me-rg LOCATION=westus2 ./infra/deploy.sh
-```
-
-The script:
-
-1. Checks `az login`, creates the resource group.
-2. Deploys the infrastructure (a public placeholder image the first time,
-   because the registry doesn't exist yet).
-3. Writes secrets from `.env` to Key Vault with `--file` (values never echoed
-   or put on the command line).
-4. Builds the image in ACR (`az acr build`) and redeploys the app onto it.
-5. Prints the app URL and the Twilio webhooks to configure:
-   - Voice webhook: `https://<app>/twilio/voice`
-   - Status callback: `https://<app>/twilio/status`
-   - Media Stream: `wss://<app>/media`
-
-Optional env vars: `APP_NAME` (default `call4me`), `IMAGE_TAG` (default: git
-short SHA), `ENV_FILE` (default `.env`), `POSTGRES_ADMIN_PASSWORD`.
-
-Re-running the script is safe: it keeps the current image during the
-infrastructure step and reuses the stored Postgres password.
+Re-running is safe. It keeps the running image during the infrastructure step, reuses
+the stored Postgres password and access token, and rolls out a new revision.
 
 ## After deploy
 
-- Point the iOS app at the printed URL.
-- Use `APNS_USE_SANDBOX=true` for development builds from Xcode and `false`
-  for TestFlight / App Store builds.
-- Logs: `az containerapp logs show -g call4me-rg -n call4me --follow`, or
-  Application Insights > Logs. Log records pass through the redaction filter
-  in `backend/telemetry.py` before export.
+- **Cartesia:** on start, the app creates or updates its Cartesia agent, tools, and
+  webhook to point at the Azure URL, and uses (or provisions) a Cartesia phone number.
+  Check the logs for `Cartesia ready: agent ..., calling from +1...`.
+- **Logs:** Log Analytics (`ContainerAppConsoleLogs_CL`; the query is printed by `deploy.sh`), or
+  Application Insights > Logs. `az containerapp logs show` crashes on some CLI versions
+  (`KeyError: 'eventStreamEndpoint'`).
+- **Switch to the backup demo:** `TELEPHONY=phone ./infra/deploy.sh`. The rep page is then
+  `https://<app>/phone`, and it works from any phone because ingress is HTTPS.
 
-## Not validated here
+## Cost and cleanup
 
-This template was written without `az`/`bicep` available, so run
-`az bicep build --file infra/main.bicep` (or the first deploy) to catch any
-schema issues.
+Roughly $1–3 a day from the student credits: Postgres B1ms, one always-on Container App
+replica, and the Basic registry. Delete everything with
+`az group delete -n call4me-rg`. The Key Vault stays soft-deleted for 7 days under the
+same name. To redeploy into a fresh group sooner, run
+`az keyvault purge -n <vault>` first.
+
+## Production path (beyond the hackathon)
+
+- Postgres on a private VNet (Container Apps VNet integration) instead of "allow Azure
+  services", with Entra ID auth instead of a password.
+- Per-user sign-in (Entra External ID / Sign in with Apple) instead of one shared
+  access token.
+- Shared call state in Redis so the app can scale beyond one replica, plus a second
+  region.
+- Azure Communication Services for telephony, with per-call cost tracking.

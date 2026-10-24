@@ -18,6 +18,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
+from backend.agent.guard import REP_FAREWELL
 from backend.contracts import (
     AgentAction,
     AskUserAction,
@@ -108,6 +109,7 @@ class BaselineDriver:
         self._order: list[str] = []  # labels in the order we asked
         self._reference: str | None = None
         self._rep_info: list[str] = []
+        self._wrapped_up = False
 
     # -- protocol ------------------------------------------------------------
 
@@ -252,8 +254,12 @@ class BaselineDriver:
             if self.session.limits.allow_cancellation and "cancel" in self.session.goal.lower():
                 return [SayAction(text="Yes, please go ahead.")]
             return [SayAction(text="No, please don't make that change.")]
+        if self._wrapped_up or (self._reference and REP_FAREWELL.search(low)):
+            return self._finish()  # both sides are done
         if "anything else" in low:
-            return self._finish()
+            # Wrap up, then hang up only once the rep has answered (never on them).
+            self._wrapped_up = True
+            return [SayAction(text="No, that's everything. Thank you for your help.")]
         if "?" in text:
             # A question we can't answer from the goal: never guess (rule 3).
             self._order.append("answer")
@@ -271,6 +277,6 @@ class BaselineDriver:
         assert self.session is not None
         summary = f"Goal: {self.session.goal}. Rep said: " + " ".join(self._rep_info[-4:])
         return [
-            SayAction(text="No, that's everything. Thank you for your help, goodbye."),
+            SayAction(text="Goodbye."),
             EndCallAction(summary=summary, reference_number=self._reference),
         ]

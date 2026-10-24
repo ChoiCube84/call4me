@@ -47,11 +47,12 @@ class ConversationAgent:
         ports: AgentPorts,
         llm: LLMClient | None = None,
         *,
-        filler_after_s: float = 1.2,
+        filler_after_s: float = 2.0,
         answer_timeout_s: float | None = None,
         answer_grace_s: float | None = None,
+        known_info: dict[str, str] | None = None,
     ) -> None:
-        self.runtime = AgentRuntime(session=session)
+        self.runtime = AgentRuntime(session=session, known_info=dict(known_info or {}))
         self.ports = ports
         self.llm = llm or get_llm_client()
         kwargs: dict[str, float] = {}
@@ -60,12 +61,13 @@ class ConversationAgent:
         if answer_grace_s is not None:
             kwargs["answer_grace_s"] = answer_grace_s
         self.tools = ToolExecutor(self.runtime, ports, **kwargs)
-        self.system_prompt = build_system_prompt(session)
+        self.system_prompt = build_system_prompt(session, list(self.runtime.known_info))
         self.messages: list[dict[str, Any]] = []
         self.filler_after_s = filler_after_s
         self._lock = asyncio.Lock()
         self._failures = 0
         self._heard_during_takeover: list[str] = []
+        self._inbox: list[str] = []
 
     @property
     def session(self) -> CallSession:
@@ -80,19 +82,58 @@ class ConversationAgent:
         redacted = audit_log.redact(text.strip())
         if not redacted:
             return
+        self.runtime.remote_history.append(redacted)
+        self.runtime.rep_turns += 1
+        self.runtime.presence_checks = 0
+        if self.runtime.taken_over:
+            # The user is typing; stay silent, but remember what the rep said for handback.
+            self._heard_during_takeover.append(redacted)
+            return
+        if self.runtime.ended:
+            return
+        self._inbox.append(redacted)
+        self.runtime.unseen_rep = True
+        if self._lock.locked():
+            return  # the running turn adds it before its next Claude call
         async with self._lock:
-            self.runtime.remote_history.append(redacted)
-            if self.runtime.taken_over:
-                # The user is typing; stay silent, but remember what the rep said for handback.
-                self._heard_during_takeover.append(redacted)
-                return
-            if self.runtime.ended:
-                return
-            self._append_user_text(f"Rep: {redacted}")
+            while self._inbox and not self.runtime.taken_over and not self.runtime.ended:
+                self._drain_inbox()
+                await self._run_turn()
+
+    def _drain_inbox(self) -> bool:
+        """Rep lines heard since the last Claude call, so Claude never answers stale context.
+        True if there were any."""
+        if not self._inbox:
+            return False
+        while self._inbox:
+            self._append_user_text(f"Rep: {self._inbox.pop(0)}")
+        # Only now has Claude "heard" the rep, so only now may it act on the reply.
+        self.runtime.unseen_rep = False
+        self.runtime.awaiting_reply = False
+        return True
+
+    async def on_rep_silence(self, seconds: float) -> None:
+        """The rep has said nothing for a while: let Claude check they're still there.
+        Two unanswered checks let the guard allow end_call (nobody there)."""
+        if self.runtime.taken_over or self.runtime.ended or self._lock.locked():
+            return
+        self.runtime.presence_checks += 1
+        if self.runtime.presence_checks >= guard.NOBODY_THERE_CHECKS:
+            note = (
+                "You asked twice and the rep did not answer. Nobody seems to be there: "
+                "say a short goodbye and call end_call with a summary for the user."
+            )
+        else:
+            note = "Ask if they are still there. Do not end the call yet."
+        async with self._lock:
+            self._append_user_text(
+                f"[System] The rep has said nothing for {seconds:.0f} seconds. {note}"
+            )
             await self._run_turn()
 
     async def takeover(self) -> None:
         """User took over: stop agent speech immediately (rule 6)."""
+        self.runtime.takeover_suggested = False
         self.runtime.takeover.set()
         await self.ports.control.stop_speaking(self.session.id)
         if self.session.state != CallState.TAKEOVER:
@@ -105,6 +146,7 @@ class ConversationAgent:
         )
 
     async def handback(self) -> None:
+        self.runtime.takeover_suggested = False
         self.runtime.takeover.clear()
         if self.session.state == CallState.TAKEOVER:
             await self.ports.control.transition(
@@ -112,9 +154,20 @@ class ConversationAgent:
             )
         heard = "\n".join(f"Rep: {line}" for line in self._heard_during_takeover)
         self._heard_during_takeover.clear()
+        if heard:
+            self.runtime.awaiting_reply = False  # Claude gets the rep's replies below
         self._append_user_text(
             "[System] The user handed the call back to you. Continue toward the goal."
             + (f" While the user was typing, the rep said:\n{heard}" if heard else "")
+        )
+
+    def note_greeting(self, text: str) -> None:
+        """The engine already spoke the pre-generated greeting; tell Claude so it
+        doesn't repeat the disclosure in its first turn."""
+        self.runtime.spoken.append(audit_log.redact(text))
+        self._append_user_text(
+            f'[System] You already said to the rep: "{audit_log.redact(text)}". '
+            "Do not repeat the AI disclosure."
         )
 
     def on_user_typed(self, text: str) -> None:
@@ -155,6 +208,10 @@ class ConversationAgent:
                 results.append(_result(call.id, outcome.content, outcome.is_error))
                 stop = stop or outcome.stop
             self.messages.append({"role": "user", "content": results})
+            heard = self._drain_inbox()  # text blocks after the tool results, same user turn
+            rt = self.runtime
+            if heard and stop and not (rt.ended or rt.taken_over or rt.takeover_suggested):
+                continue  # the rep spoke while we acted (e.g. asked something new): answer it
             if stop or resp.stop_reason != "tool_use":
                 return
         log.warning("tool round limit reached for %s", self.session.id)
@@ -246,9 +303,12 @@ def default_ports(control: Any) -> AgentPorts:
 
 
 def start_agent(
-    session: CallSession, ports: AgentPorts, llm: LLMClient | None = None
+    session: CallSession,
+    ports: AgentPorts,
+    llm: LLMClient | None = None,
+    known_info: dict[str, str] | None = None,
 ) -> ConversationAgent:
-    agent = ConversationAgent(session, ports, llm)
+    agent = ConversationAgent(session, ports, llm, known_info=known_info)
     _agents[session.id] = agent
     return agent
 

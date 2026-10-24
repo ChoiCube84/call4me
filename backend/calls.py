@@ -17,7 +17,8 @@ import asyncio
 import contextlib
 import logging
 import re
-from collections.abc import Awaitable
+import time
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,6 +55,29 @@ from backend.telephony.base import CallControl
 log = logging.getLogger("call4me.calls")
 
 SPEECH_MARK_TIMEOUT_S = 30.0
+# End of the rep's turn: this long with no new words (partial or final). STT splits a
+# long turn into several finals; answering each one makes the agent talk over the rep.
+# How long depends on how the words so far end: a question wants a quick answer, a
+# trailing fragment ("While I have you,") means more is coming.
+REP_TURN_GAP_QUESTION_S = 0.6
+REP_TURN_GAP_S = 1.0
+REP_TURN_GAP_FRAGMENT_S = 2.0
+REP_VOICE_TAIL_S = 0.6  # after the rep's voice (VAD) stops
+REP_TURN_MAX_EXTRA_S = 3.0  # cap on waiting for voice past the words-based deadline
+
+
+def _rep_turn_gap(text: str) -> float:
+    end = text.rstrip()[-1:]
+    if end == "?":
+        return REP_TURN_GAP_QUESTION_S
+    if end in (".", "!"):
+        return REP_TURN_GAP_S
+    return REP_TURN_GAP_FRAGMENT_S
+
+
+# Rep silent this long (after we stopped talking) in conversation: Claude checks they're
+# still there. Two unanswered checks let the agent end the call (guard rule).
+REP_SILENCE_S = 10.0
 
 
 # --------------------------------------------------------------------------- #
@@ -208,11 +232,17 @@ class LiveCall:
         callback_number: str = "",
         recorder: st.TransitionRecorder | None = None,
         persist: bool = True,
+        known_info: dict[str, str] | None = None,
     ) -> None:
         self.session = session
         self.clients = clients
         self.persist = persist
-        self.echo = EchoGate()
+        # Typed by the user before the call. Memory only: registered for redaction now,
+        # handed to the agent, dropped with the call.
+        self.known_info = dict(known_info or {})
+        for value in self.known_info.values():
+            audit.register_secret(session.id, value)
+        self.echo = EchoGate(gate_audio=not getattr(clients.telephony, "echo_cancelled", False))
         self.control = AgentControl(self)
         self.recorder = recorder or st.DbRecorder()
         self.agent: conversation.ConversationAgent | None = None
@@ -221,6 +251,10 @@ class LiveCall:
         self._timing = _Timing()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._finishing = False
+        self._rep_buffer: list[str] = []
+        self._rep_last_heard = 0.0
+        self._talk_at = 0.0  # when the conversation agent took over
+        self._rep_flush: asyncio.Task[Any] | None = None
         self.engine = CallEngine(
             session,
             EngineDeps(
@@ -247,7 +281,13 @@ class LiveCall:
 
     async def start(self, *, place_call: bool = True) -> None:
         tel = self.clients.telephony
-        await self.clients.stt.start(self.id)
+        try:
+            await self.clients.stt.start(self.id)
+        except Exception as e:  # noqa: BLE001 - no ears, no call: say why instead of hanging
+            log.exception("speech-to-text failed to start for %s", self.id)
+            await self.engine.fail(_service_failure("speech-to-text", e))
+            await self._finish()
+            return
         # The greeting is written by Claude and pre-synthesized while we dial (section 6).
         self._spawn(self._prepare_greeting())
         if place_call:
@@ -262,6 +302,7 @@ class LiveCall:
         self._spawn(self._pump_transcripts())
         self._spawn(self._pump_status())
         self._spawn(self.engine.run())
+        self._spawn(self._watch_rep_silence())
         if hasattr(tel, "remote_segments") and hasattr(self.clients.stt, "inject"):
             # Mock line + mock STT: the line's script text stands in for recognized speech.
             self._spawn(self._pump_mock_segments())
@@ -284,10 +325,29 @@ class LiveCall:
             if self.engine.done:
                 break
 
+    async def _watch_rep_silence(self) -> None:
+        last_nudge = 0.0
+        while not self.engine.done:
+            await asyncio.sleep(1.0)
+            agent, rt = self.agent, self.agent.runtime if self.agent else None
+            if agent is None or rt is None or self.session.state != CallState.IN_CONVERSATION:
+                continue
+            if rt.taken_over or rt.takeover_suggested or rt.ended or self.echo.agent_speaking:
+                continue  # the user is deciding, or we're talking
+            if self._rep_flush is not None and not self._rep_flush.done():
+                continue  # a rep turn is on its way to Claude
+            now = time.monotonic()
+            quiet_since = max(self._rep_last_heard, self._talk_at, self.echo.play_until, last_nudge)
+            if now - quiet_since >= REP_SILENCE_S:
+                last_nudge = now
+                self._spawn(agent.on_rep_silence(now - max(self._rep_last_heard, self._talk_at)))
+
     async def _pump_transcripts(self) -> None:
         async for t in self.clients.stt.transcripts(self.id):
             if t.speaker is Speaker.REMOTE and self.echo.is_echo(t.text):
                 continue  # our own TTS heard back on the line
+            if t.speaker is Speaker.REMOTE and t.text.strip():
+                self._rep_last_heard = time.monotonic()
             await self._caption(t)
             await self.engine.on_transcript(t)
             if self.engine.done:
@@ -353,17 +413,43 @@ class LiveCall:
             ports = conversation.default_ports(self.control)
             ports.user = NotifierUserChannel(self.clients.notifier)
             ports.audit = _LiveDenials(ports.audit, session.id)
-            self.agent = conversation.start_agent(session, ports, self.clients.llm)
-            self.agent.runtime.spoken.append(audit.redact(self.engine.greeting_text))
+            self.agent = conversation.start_agent(
+                session, ports, self.clients.llm, known_info=self.known_info
+            )
+            self._talk_at = time.monotonic()
+            self.agent.note_greeting(self.engine.greeting_text)
             if reply:
-                self._spawn(self.agent.on_rep_turn(reply))
+                self._queue_rep_text(reply)
         else:
             await self.agent.handback()
 
     async def _on_remote_turn(self, t: Transcript) -> None:
         if self.agent is not None:
-            # Don't block the engine: it must keep spotting transfers while Claude thinks.
-            self._spawn(self.agent.on_rep_turn(t.text))
+            self._queue_rep_text(t.text)
+
+    def _queue_rep_text(self, text: str) -> None:
+        self._rep_buffer.append(text)
+        if self._rep_flush is None or self._rep_flush.done():
+            # A task, so the engine keeps spotting transfers while we wait and Claude thinks.
+            self._rep_flush = self._spawn(self._flush_rep_turn())
+
+    def _rep_turn_deadline(self) -> float:
+        by_words = self._rep_last_heard + _rep_turn_gap(" ".join(self._rep_buffer))
+        # Still audibly talking (the transcript lags): wait, but not forever on noise.
+        by_voice = min(
+            self.pipeline.last_voice_at + REP_VOICE_TAIL_S, by_words + REP_TURN_MAX_EXTRA_S
+        )
+        return max(by_words, by_voice)
+
+    async def _flush_rep_turn(self) -> None:
+        # A sliding deadline: each new word pushes it back.
+        while (wait := self._rep_turn_deadline() - time.monotonic()) > 0:  # noqa: ASYNC110
+            await asyncio.sleep(wait)
+        text = " ".join(self._rep_buffer)
+        self._rep_buffer.clear()
+        self._rep_flush = None  # words heard from here on start a new turn
+        if text.strip() and self.agent is not None:
+            await self.agent.on_rep_turn(text)
 
     async def _on_state_change(self, before: CallState, after: CallState) -> None:
         loop = asyncio.get_running_loop()
@@ -457,9 +543,15 @@ class LiveCall:
         agent_ended = self.agent is not None and self.agent.runtime.ended
         if s.reference_number is None and self.agent is not None:
             # The rep may hang up right after the read-back, before end_call runs.
-            s.reference_number = _read_back_reference(self.agent.runtime.spoken)
-        if not agent_ended and s.outcome is None:
-            code = self.engine.outcome or s.state.value.lower()
+            rt = self.agent.runtime
+            # The full transcript last: remote_history keeps only recent lines, and a
+            # takeover's typed lines can push the rep's "reference is ..." out of it.
+            s.reference_number = _read_back_reference(
+                rt.spoken, rt.remote_history, self._timing.transcript
+            )
+        if not agent_ended:
+            # The engine stores outcome codes ("remote_hangup"); the user reads plain words.
+            code = s.outcome or self.engine.outcome or s.state.value.lower()
             s.outcome = OUTCOME_TEXT.get(code, code.replace("_", " "))
         summary = await post_call_summary(self.clients.llm, s, self._timing.transcript)
 
@@ -467,7 +559,12 @@ class LiveCall:
             await self._save_session()
             await self._record_event(
                 "call.ended",
-                {"outcome": audit.redact(s.outcome or ""), "minutes_saved": s.minutes_saved},
+                {
+                    "outcome": audit.redact(s.outcome or ""),
+                    "minutes_saved": s.minutes_saved,
+                    # Kept for the summary screen (GET /calls/{id}); already redacted.
+                    "summary": audit.redact(summary),
+                },
             )
         data = {
             "summary": summary,
@@ -593,13 +690,32 @@ OUTCOME_TEXT = {
     "ended": "The call ended.",
 }
 
-_REFERENCE_RE = re.compile(r"\breference(?: number)? is ([A-Z0-9-]{4,})", re.I)
+_REFERENCE_RE = re.compile(r"\breference(?: number)?(?: is|:)?\s+([A-Za-z0-9 -]{4,30})", re.I)
 
 
-def _read_back_reference(spoken: list[str]) -> str | None:
-    for line in reversed(spoken):
-        if m := _REFERENCE_RE.search(line):
-            return m.group(1).upper()
+def _service_failure(what: str, e: BaseException) -> str:
+    """Plain reason shown to the user when a voice service refuses to work."""
+    text = str(e).lower()
+    if "402" in text or "credits" in text or "quota" in text:
+        return f"The voice service ({what}) is out of credits. The call was not made."
+    return f"The voice service ({what}) is unavailable right now. The call was not made."
+
+
+def _read_back_reference(*sources: Iterable[str]) -> str | None:
+    """The last reference number said on the call: "reference is A7X291", "Reference
+    A7X291 for...", or STT's spaced "reference number is a 7x291"."""
+    for lines in sources:
+        for line in reversed(list(lines)):
+            if m := _REFERENCE_RE.search(line):
+                parts = []
+                for token in re.split(r"[ -]", m.group(1)):
+                    if token and (len(token) == 1 or any(c.isdigit() for c in token)):
+                        parts.append(token)
+                    elif parts or token:
+                        break
+                ref = "".join(parts).upper()
+                if len(ref) >= 4 and any(c.isdigit() for c in ref):
+                    return ref
     return None
 
 
@@ -619,10 +735,10 @@ def _record_metrics(call: LiveCall) -> None:
 # Registry used by the API
 # --------------------------------------------------------------------------- #
 
-registry: dict[str, LiveCall] = {}
+registry: dict[str, Any] = {}  # LiveCall or cartesia.call.CartesiaCall
 
 
-def get_call(session_id: str) -> LiveCall | None:
+def get_call(session_id: str) -> Any:
     return registry.get(session_id)
 
 
@@ -632,50 +748,26 @@ async def start_call(
     *,
     place_call: bool = True,
     persist: bool = True,
-) -> LiveCall:
+    known_info: dict[str, str] | None = None,
+) -> Any:
+    """Start a call: a Cartesia agent dials (default), or our own pipeline runs it
+    against the fake line (TELEPHONY=phone|mock, or when `clients` are given)."""
     settings = get_settings()
+    if clients is None and settings.telephony_mode == "cartesia":
+        from backend.cartesia.call import CartesiaCall
+
+        cartesia_call = CartesiaCall(
+            session, settings=settings, known_info=known_info, persist=persist
+        )
+        registry[session.id] = cartesia_call
+        await cartesia_call.start()
+        return cartesia_call
     call = LiveCall(
         session,
         clients or default_clients(settings),
-        callback_number=settings.twilio_agent_number,
         persist=persist,
+        known_info=known_info,
     )
     registry[session.id] = call
     await call.start(place_call=place_call)
     return call
-
-
-async def watch_incoming_callbacks() -> None:
-    """Answer company callbacks on the agent number (CLAUDE.md section 6).
-
-    A callback matched to a session restarts that session's call as if a person
-    picked up: the engine hears the rep, greets, and the agent continues the goal.
-    """
-    from backend.db.models import CallSessionRow
-    from backend.db.session import sessionmaker
-    from backend.main import _to_session
-    from backend.telephony.streams import registry as streams
-
-    while True:
-        incoming = await streams.incoming.get()
-        if not incoming.matched_callback or incoming.session_id in registry:
-            continue
-        try:
-            async with sessionmaker()() as db:
-                row = await db.get(CallSessionRow, incoming.session_id)
-                if row is None:
-                    continue
-                row.state = CallState.DIALING
-                row.ended_at = None
-                await audit.append(
-                    db,
-                    actor="twilio",
-                    action="call.callback_answered",
-                    subject=row.id,
-                    reason="company called back on the agent number",
-                )
-                await db.commit()
-                session = _to_session(row)
-            await start_call(session, place_call=False)
-        except Exception:  # noqa: BLE001
-            log.exception("could not resume session %s for a callback", incoming.session_id)

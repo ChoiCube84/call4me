@@ -75,6 +75,7 @@ def test_digits_matching_secret_blocked(runtime) -> None:
 
 def test_end_call_summary_is_redacted(runtime) -> None:
     audit.register_secret(runtime.session.id, "4821")
+    runtime.remote_history.append("Thanks for calling, goodbye.")
     r = guard.check(EndCallAction(summary="Verified with PIN 4821."), runtime.session, runtime)
     assert r.allowed and "4821" not in r.action.summary
 
@@ -223,6 +224,7 @@ def test_takeover_blocks_every_agent_action(runtime) -> None:
 
 
 def test_end_call_requires_reference_read_back(runtime) -> None:
+    runtime.remote_history.append("Have a great day. Bye.")
     end = EndCallAction(summary="Fee waived.", reference_number="A7X291")
     assert not guard.check(end, runtime.session, runtime).allowed
     runtime.spoken.append("Just to confirm, the reference is A7X291?")
@@ -260,3 +262,86 @@ def test_guard_is_fast(runtime) -> None:
     for _ in range(100):
         say("No thanks, I'd just like the late fee removed please.", runtime)
     assert (time.perf_counter() - start) / 100 < 0.01
+
+
+UPSELL = (
+    "I can do that. While I have you, would you like to upgrade to Premium for $9.99 a "
+    "month? It includes free late-fee protection."
+)
+
+
+def test_declining_upsell_while_restating_fee_goal_allowed(runtime) -> None:
+    # The $40 is the fee being removed (the goal), not a payment.
+    for text in (
+        "Yes, please remove the $40 late fee. No thank you to the Premium upgrade.",
+        "No thanks, we don't want the upgrade. Yes, just remove the $40 late fee, please.",
+    ):
+        assert say(text, runtime, rep=UPSELL).allowed, text
+
+
+def test_agreeing_to_upsell_or_paying_fee_still_blocked(runtime) -> None:
+    assert not say("Yes, I'd like the Premium upgrade.", runtime, rep=UPSELL).allowed
+    assert not say("Sure, go ahead and charge the $40.", runtime, rep="The fee is $40.").allowed
+    assert not say("Yes, we'll pay the $40 late fee.", runtime, rep="Can you pay it?").allowed
+
+
+def test_end_call_waits_for_reply_to_read_back(runtime) -> None:
+    runtime.spoken.append("Just to confirm, the reference is A7X291?")
+    runtime.awaiting_reply = True
+    end = EndCallAction(summary="Fee removed.", reference_number="A7X291")
+    assert not guard.check(end, runtime.session, runtime).allowed
+    runtime.awaiting_reply = False  # the rep answered
+    runtime.remote_history.append("Yes, that's right. Goodbye.")
+    assert guard.check(end, runtime.session, runtime).allowed
+
+
+def test_end_call_blocked_while_rep_line_unseen(runtime) -> None:
+    runtime.unseen_rep = True
+    end = EndCallAction(summary="Done.")
+    assert not guard.check(end, runtime.session, runtime).allowed
+
+
+# --- ending the call: both sides done, or nobody there ------------------------------
+
+
+def test_end_call_blocked_mid_conversation(runtime) -> None:
+    runtime.remote_history.append("No.")
+    runtime.rep_turns = 5
+    r = guard.check(EndCallAction(summary="Done."), runtime.session, runtime)
+    assert not r.allowed and "both sides" in r.reason
+
+
+def test_end_call_after_wrap_up_and_rep_answer(runtime) -> None:
+    runtime.rep_turns = 5
+    runtime.closing_at_turn = 5  # agent: "That's all I needed, thank you for your help."
+    assert not guard.check(EndCallAction(summary="Done."), runtime.session, runtime).allowed
+    runtime.remote_history.append("You're welcome.")
+    runtime.rep_turns = 6
+    assert guard.check(EndCallAction(summary="Done."), runtime.session, runtime).allowed
+
+
+def test_end_call_when_wrap_up_answers_reps_anything_else(runtime) -> None:
+    # Reps often say "have a great day" and hang up at once, so this is the last chance.
+    runtime.remote_history.append("Is there anything else I can help you with today?")
+    runtime.rep_turns = 5
+    assert not guard.check(EndCallAction(summary="Done."), runtime.session, runtime).allowed
+    runtime.closing_at_turn = 5  # agent: "No, that's all. Thank you, goodbye!"
+    assert guard.check(EndCallAction(summary="Done."), runtime.session, runtime).allowed
+    runtime.awaiting_reply = True  # agent: "No, that's all. Could you email a receipt?"
+    assert not guard.check(EndCallAction(summary="Done."), runtime.session, runtime).allowed
+
+
+def test_end_call_when_nobody_answers_twice(runtime) -> None:
+    runtime.presence_checks = 2  # asked twice; the second ask hasn't had time to be answered
+    assert not guard.check(EndCallAction(summary="No answer."), runtime.session, runtime).allowed
+    runtime.presence_checks = 3
+    assert guard.check(EndCallAction(summary="No answer."), runtime.session, runtime).allowed
+
+
+def test_end_call_blocked_while_user_decides_on_takeover(runtime) -> None:
+    runtime.takeover_suggested = True
+    runtime.rep_turns, runtime.closing_at_turn = 3, 1
+    r = guard.check(EndCallAction(summary="Handed off."), runtime.session, runtime)
+    assert not r.allowed and "take over" in r.reason
+    runtime.remote_history.append("Okay, I'll call back later. Bye.")  # the rep leaves
+    assert guard.check(EndCallAction(summary="Rep left."), runtime.session, runtime).allowed

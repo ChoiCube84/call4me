@@ -1,9 +1,10 @@
-"""Telephony (owned by `telephony`): Twilio calls, `/media` stream, DTMF, takeover.
+"""Telephony for our own pipeline (the backup to Cartesia calls): the browser fake
+phone and the scripted mock line, both playing the fake support line.
 
 Public surface for other areas::
 
     from backend.telephony import get_telephony
-    tel = get_telephony()            # TwilioTelephonyClient, or MockTelephonyClient if USE_MOCKS
+    tel = get_telephony()            # PhoneLineClient (TELEPHONY=phone) or MockTelephonyClient
     await tel.place_call(session)
     await tel.wait_connected(session.id)
     async for frame in tel.audio_in(session.id): ...   # 160-byte mu-law frames, 20 ms
@@ -13,8 +14,7 @@ Public surface for other areas::
     await tel.start_takeover(session.id) / end_takeover / hang_up / clear_audio
 
 See `base.CallControl` for the extras beyond `contracts.TelephonyClient`.
-Platform wiring: `media_ws.handle` (WS /media), `twilio_client.handle_status_form`
-(POST /twilio/status), `routes.router` (POST /twilio/voice), `fakeline.app.app`.
+Real phone calls go through Cartesia instead (`backend/cartesia`).
 """
 
 from __future__ import annotations
@@ -28,20 +28,21 @@ _client: CallControl | None = None
 
 
 def get_telephony() -> CallControl:
-    """Process-wide telephony client, chosen by USE_MOCKS."""
+    """Process-wide line for our own pipeline: the browser fake phone (TELEPHONY=phone)
+    or the scripted mock line. Cartesia calls (the default) don't use this."""
     global _client
     if _client is None:
         # Imported lazily: the mock pulls in fakeline, which imports this package.
         from backend.config import get_settings
 
-        if get_settings().use_mocks:
+        if get_settings().telephony_mode == "phone":
+            from backend.telephony.phone_client import PhoneLineClient
+
+            _client = PhoneLineClient()
+        else:
             from backend.telephony.mock_client import MockTelephonyClient
 
             _client = MockTelephonyClient()
-        else:
-            from backend.telephony.twilio_client import TwilioTelephonyClient
-
-            _client = TwilioTelephonyClient()
     return _client
 
 

@@ -2,11 +2,13 @@ import Foundation
 
 enum APIError: LocalizedError {
     case noServer
+    case badAccessCode
     case http(Int, String)
 
     var errorDescription: String? {
         switch self {
         case .noServer: return "Server address is not set. Check Settings."
+        case .badAccessCode: return "Wrong access code. Check Settings."
         case .http(let code, _): return "The server said no (code \(code)). Try again."
         }
     }
@@ -77,6 +79,7 @@ struct APIClient {
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         var req = URLRequest(url: try url(path, query: query))
         req.httpMethod = "GET"
+        authorize(&req)
         return try await decode(req)
     }
 
@@ -92,8 +95,15 @@ struct APIClient {
         var req = URLRequest(url: try url(path))
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        authorize(&req)
         if let body { req.httpBody = try JSONCoding.encoder.encode(body) }
         return req
+    }
+
+    private func authorize(_ req: inout URLRequest) {
+        if let token = settings.token {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
     }
 
     private func decode<T: Decodable>(_ req: URLRequest) async throws -> T {
@@ -104,6 +114,7 @@ struct APIClient {
     private func perform(_ req: URLRequest) async throws -> Data {
         let (data, response) = try await session.data(for: req)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 { throw APIError.badAccessCode }
         guard (200..<300).contains(code) else {
             throw APIError.http(code, String(decoding: data, as: UTF8.self))
         }

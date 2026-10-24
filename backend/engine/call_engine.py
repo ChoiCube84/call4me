@@ -48,6 +48,7 @@ from backend.engine.menu import (
     MenuParser,
     MenuPathStore,
     RegexMenuParser,
+    decline_callback_options,
     parse_menu_options,
 )
 from backend.engine.timers import CallTimers, TimerEvent
@@ -94,10 +95,18 @@ class EngineConfig:
     check_interval_s: float = 2.5
     window_s: float = 10.0
     state_threshold: float = 0.6  # minimum Jev probability to change state
-    human_threshold: float = 0.8  # "high confidence" for the greeting fast path
+    # Greeting fast path. Moderate on purpose: the rep must still answer the greeting
+    # (confirm step), so a false alarm only costs one greeting over a recording.
+    human_threshold: float = 0.6
+    human_streak_threshold: float = 0.45  # two "human" checks in a row at this level also count
+    live_person_threshold: float = 0.55  # yes/no "live person?" on each utterance while waiting
     terminal_threshold: float = 0.8  # voicemail / call_ended end the call, so be sure
     confirm_threshold: float = 0.6
-    menu_settle_s: float = 1.5  # wait this long after the last menu words before acting
+    # Replaying a saved route presses keys without listening, and STT words each menu a
+    # bit differently, so a looping route can look clean when saved. Off: Jev picks
+    # each option from what it hears. Routes are still saved (insight, future hints).
+    replay_menu_paths: bool = False
+    menu_settle_s: float = 2.5  # wait this long after the last menu words before acting
     confirm_timeout_s: float = 8.0  # no reply to the greeting -> back to hold
     hold_music_pause_threshold: float = 0.8
     hold_extend_s: float = 15 * 60
@@ -115,7 +124,7 @@ class EngineDeps:
     recorder: st.TransitionRecorder
     menu_parser: MenuParser = field(default_factory=RegexMenuParser)
     menu_paths: MenuPathStore = field(default_factory=MemoryMenuPathStore)
-    callback_number: str = ""  # the agent's own Twilio number (CLAUDE.md section 6)
+    callback_number: str = ""  # number to give for a callback; none on our pipeline
     on_conversation_start: ConversationStart | None = None
     on_remote_turn: RemoteTurn | None = None
     on_state_change: StateChange | None = None
@@ -151,6 +160,7 @@ class CallEngine:
         self.time_to_greet_s: float | None = None
 
         self._finals: deque[tuple[float, str]] = deque()
+        self._human_streak = 0  # consecutive moderate "human" state checks
         self._partial = ""
         self._last_remote_at: float | None = None
         self._menu_buffer: list[str] = []
@@ -159,6 +169,7 @@ class CallEngine:
         self._check_lock = asyncio.Lock()
         self._greeting_task: asyncio.Task[None] | None = None
         self._greeting_started_at: float | None = None
+        self._greeting_ends_at: float | None = None
         self._suspected_from: CallState = S.HOLD
         self._confirm_buffer: list[str] = []
         self._pre_takeover: CallState | None = None
@@ -178,10 +189,11 @@ class CallEngine:
 
     async def start(self) -> None:
         """Before the call connects: load a saved route and pre-generate the greeting."""
-        try:
-            self.navigator.saved_path = await self.deps.menu_paths.load(self.session.company)
-        except Exception:  # noqa: BLE001 - menu memory is polish, never block a call on it
-            log.exception("could not load menu path")
+        if self.config.replay_menu_paths:
+            try:
+                self.navigator.saved_path = await self.deps.menu_paths.load(self.session.company)
+            except Exception:  # noqa: BLE001 - menu memory is polish, never block a call on it
+                log.exception("could not load menu path")
         try:
             await self.deps.tts.pregenerate(self.greeting_key, self.greeting_text)
         except Exception:  # noqa: BLE001 - we fall back to live synthesis at greet time
@@ -265,6 +277,8 @@ class CallEngine:
         if self.state is S.MENU:
             self._menu_buffer.append(text)
             self._menu_last_at = now
+        if self.state in WAITING_STATES and await self._check_live_person(text):
+            return
         if self.state in PRE_HUMAN_STATES:
             # Don't wait for the next tick: a rep's "hello" must be answered fast.
             await self.check_state(reason="new speech")
@@ -311,6 +325,7 @@ class CallEngine:
             decision = await jev_checks.classify_state(
                 self.deps.decisions,
                 transcript=self.window_text(),
+                latest=self._partial or (self._finals[-1][1] if self._finals else ""),
                 audio_label=self.audio_label,
                 current_state=self.state,
                 silence_s=self.timers.silence_seconds,
@@ -320,12 +335,39 @@ class CallEngine:
             await self._apply_state_decision(decision)
             return decision
 
+    async def _check_live_person(self, latest: str) -> bool:
+        """True if a person just started talking (and the greeting is under way)."""
+        window = self.window_text()
+        previous = window[: max(0, len(window) - len(latest))].strip()
+        d = await jev_checks.live_person(
+            self.deps.decisions,
+            latest=latest,
+            previous=previous,
+            timeout_s=self.config.jev_timeout_s,
+        )
+        await self._record_decision(d, "new speech: live person?")
+        if self.state not in WAITING_STATES:
+            return False
+        if d.choice == "live_person" and d.probability >= self.config.live_person_threshold:
+            await self._human_detected(d)
+            return True
+        return False
+
     async def _apply_state_decision(self, d: JevDecision) -> None:
         label, p = d.choice, d.probability
         if label == "human":
-            if p >= self.config.human_threshold:
+            # One confident call, or two moderate ones in a row: the rep's first words
+            # often share the window with the recording before them, which lowers p.
+            if p >= self.config.human_threshold or (
+                p >= self.config.human_streak_threshold and self._human_streak
+            ):
+                self._human_streak = 0
                 await self._human_detected(d)
+            elif p >= self.config.human_streak_threshold:
+                self._human_streak += 1
             return
+        if label != "silence":
+            self._human_streak = 0
         if label == "silence" or p < self.config.state_threshold:
             return
         target = _LABEL_TO_STATE[label]
@@ -430,6 +472,8 @@ class CallEngine:
         accept = self.config.callback_policy == "accept" and bool(self.deps.callback_number)
         text = self.window_text()
         options = parse_menu_options(text)
+        if not accept:
+            options = decline_callback_options(options)
         await self._event(
             "callback_offer",
             {
@@ -493,18 +537,26 @@ class CallEngine:
         await self._resume_stt()
         self._confirm_buffer.clear()
         self._greeting_started_at = self.clock()
+        self._greeting_ends_at = None
         self._greeting_task = self._spawn(self._play_greeting(detected_at))
 
     async def _play_greeting(self, detected_at: float) -> None:
         sent = False
+        first_at = 0.0
+        seconds = 0.0
 
         async def stream(frames: AsyncIterator[bytes], source: str) -> None:
-            nonlocal sent
+            nonlocal sent, first_at, seconds
             async for frame in frames:
                 if not sent:
                     sent = True
+                    first_at = self.clock()
                     await self._greeting_first_frame(detected_at, source)
                 await self.deps.telephony.send_audio(self.session.id, frame)
+                # 8 kHz mu-law: one byte per sample.
+                seconds += len(frame) / 8000 / getattr(self.deps.telephony, "line_speed", 1.0)
+                # Frames are queued faster than real time; the rep hears them until here.
+                self._greeting_ends_at = first_at + seconds
 
         try:
             try:
@@ -531,11 +583,23 @@ class CallEngine:
                 "source": source,
                 "time_to_greet_s": round(self.time_to_greet_s, 3),
                 "reason": "human suspected",
+                # Shown as call4me's first caption (the disclosure; never private data).
+                "text": self.greeting_text,
             },
             audit_action="greeting.play",
         )
 
+    def _greeting_playing(self) -> bool:
+        task = self._greeting_task
+        if task is not None and not task.done():
+            return True
+        return self._greeting_ends_at is not None and self.clock() < self._greeting_ends_at
+
     async def _on_greeting_reply(self, text: str) -> None:
+        if self._greeting_playing():
+            # Talk-over: the rep finishing their own sentence, not a reply to us. STT
+            # often splits "This is Alex. How can I help?" across the greeting.
+            return
         self._confirm_buffer.append(text)
         reply = " ".join(self._confirm_buffer)
         d = await jev_checks.confirm_human(
@@ -547,9 +611,12 @@ class CallEngine:
         await self._record_decision(d, "confirm human")
         if self.state is not S.HUMAN_SUSPECTED:
             return
-        if d.choice == "human" and d.probability >= self.config.confirm_threshold:
-            await self._human_confirmed(reply, d.probability)
-        elif d.choice == "recording" and d.probability >= self.config.confirm_threshold:
+        # Asymmetric on purpose: missing a real person loses the call, while a recording
+        # mistaken for one is caught by the next state checks and the confirm timeout.
+        p_human = max(d.probability, d.alternatives.get("human", 0.0))
+        if d.choice == "human" and p_human >= self.config.confirm_threshold:
+            await self._human_confirmed(reply, p_human)
+        elif d.choice == "recording" and d.probability >= self.config.terminal_threshold:
             await self._false_human("recording ignored the greeting", d.probability)
 
     async def _human_confirmed(self, reply: str, p: float) -> None:
@@ -559,7 +626,8 @@ class CallEngine:
             "A person answered", "Open the app to read the call.", category="HUMAN_ANSWERED"
         )
         try:
-            await self.deps.menu_paths.save_success(self.session.company, self.navigator.steps)
+            if self.navigator.clean_path:
+                await self.deps.menu_paths.save_success(self.session.company, self.navigator.steps)
         except Exception:  # noqa: BLE001
             log.exception("could not save menu path")
         await self._go(S.IN_CONVERSATION, "handing off to conversation agent", p)
@@ -571,9 +639,10 @@ class CallEngine:
         await self._go(self._suspected_from, reason, p)
 
     async def _check_confirm_timeout(self) -> None:
-        if self._greeting_started_at is None:
+        if self._greeting_started_at is None or self._greeting_playing():
             return
-        if self.clock() - self._greeting_started_at > self.config.confirm_timeout_s:
+        since = self._greeting_ends_at or self._greeting_started_at
+        if self.clock() - since > self.config.confirm_timeout_s:
             await self._false_human("no reply to greeting", None)
 
     async def _stop_greeting(self) -> None:
@@ -688,14 +757,14 @@ class CallEngine:
         return changed
 
     async def on_call_status(self, status: str) -> None:
-        """Twilio status callback values: completed, busy, failed, no-answer, canceled."""
+        """Line status values: completed, busy, failed, no-answer, canceled."""
         if self.done:
             return
         if status == "completed":
             outcome = "callback_scheduled" if self.callback_accepted else "remote_hangup"
-            await self.end(f"twilio: {status}", outcome=outcome, hang_up=False)
+            await self.end(f"line: {status}", outcome=outcome, hang_up=False)
         elif status in ("busy", "failed", "no-answer", "canceled"):
-            await self.fail(f"twilio: {status}")
+            await self.fail(f"line: {status}")
 
     # ------------------------------------------------------------------ #
     # Helpers

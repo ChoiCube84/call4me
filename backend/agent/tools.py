@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -47,6 +48,9 @@ STILL_WAITING_LINE = (
 TAKEOVER_LINE = "One moment please. The customer will type their answer to you directly."
 CLOSING_LINE = "Thank you for your help. Goodbye."
 ANSWER_PLACEHOLDER = "{answer}"
+# Without this, Claude reads back details and calls end_call in the same turn,
+# before the rep has confirmed them.
+SAID = "said. If you asked the rep a question, end your turn now and wait for their reply."
 
 ASK_USER_TIMEOUT_S = 60.0
 ASK_USER_GRACE_S = 60.0
@@ -75,7 +79,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     ),
     _strict(
         "ask_user",
-        "Ask the user for information only they know (PIN, account number, a decision). "
+        "Ask the user for information only they know (PIN, account number, a decision) "
+        "that is not already in <known_info>. "
         "The rep hears a holding line while the user types. You will NOT see the answer: "
         "the system speaks it to the rep once using relay_template, then forgets it. "
         "Never use this for a full SSN, full card number, or password; use "
@@ -85,7 +90,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "type": "string",
                 "description": "Short, plain question shown on the user's phone.",
             },
-            "sensitivity": {"type": "string", "enum": ["low", "medium", "high"]},
+            "sensitivity": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "low: order number, ZIP code, email. medium: PIN, passcode, "
+                "account number, date of birth, last 4 digits of SSN or card (relayed once, "
+                "then forgotten). high: only a full SSN, full card number, or password.",
+            },
             "relay_template": {
                 "type": "string",
                 "description": "Sentence spoken to the rep with the answer in place of "
@@ -98,6 +109,14 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
         ["question", "sensitivity", "relay_template", "relay_as"],
+    ),
+    _strict(
+        "share_info",
+        "Say something the user gave before the call (listed in <known_info>), e.g. the "
+        "order number. You will NOT see the value; the system says it to the rep as "
+        "'The <label> is <value>.' Then wait for the rep's reply.",
+        {"label": {"type": "string", "description": "The label from <known_info>."}},
+        ["label"],
     ),
     _strict(
         "press_digits",
@@ -131,6 +150,24 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 _action_adapter: TypeAdapter[AgentAction] = TypeAdapter(AgentAction)
 
+_MARKUP = re.compile(r"</?\s*[A-Za-z_][\w:-]*(?:\s[^<>]*)?>|\{\s*\w+\s*\}")
+_GROUP = re.compile(r"[A-Za-z0-9]+")
+
+
+def clean_speech(text: str) -> str:
+    """Drop markup or template placeholders that leaked into model text ("<parameter
+    name=...>", "{answer}"), so TTS never reads them out."""
+    return re.sub(r"\s{2,}", " ", _MARKUP.sub(" ", text)).strip()
+
+
+def for_speech(value: str) -> str:
+    """How a number-like value is read to the rep: one character at a time, with a
+    pause between groups ("112-4567890" -> "1 1 2, 4 5 6 7 8 9 0"). Words stay as is."""
+    if sum(c.isdigit() for c in value) < 3:
+        return value
+    groups = _GROUP.findall(value)
+    return ", ".join(" ".join(g) if any(c.isdigit() for c in g) else g for g in groups)
+
 
 @dataclass
 class ToolOutcome:
@@ -163,6 +200,15 @@ class ToolExecutor:
     # ------------------------------------------------------------------ #
 
     async def execute(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
+        if name == "share_info":
+            await self.ports.audit(
+                actor="agent",
+                action="tool.share_info",
+                subject=self.session.id,
+                reason="tool call from Claude",
+                evidence={"input": {"label": tool_input.get("label")}},
+            )
+            return await self.share_info(str(tool_input.get("label", "")))
         extra = {k: tool_input.get(k) for k in ("relay_template", "relay_as")}
         payload = {k: v for k, v in tool_input.items() if k not in extra}
         try:
@@ -210,17 +256,34 @@ class ToolExecutor:
                 )
             return ToolOutcome(f"blocked: {result.reason}", is_error=True)
         assert isinstance(result.action, SayAction)
+        if self.rt.unseen_rep:
+            # Written before the rep's latest words; saying it now would answer stale context.
+            return ToolOutcome(
+                "not said: the rep just said something new (below). Respond to that instead.",
+                is_error=True,
+            )
         await self._speak(result.action.text)
-        return ToolOutcome("said")
+        # Asked the rep something: the turn ends here, so Claude waits for the answer
+        # instead of talking on ("Are you still there?" seconds later).
+        return ToolOutcome(SAID, stop="?" in result.action.text)
 
-    async def _speak(self, text: str) -> None:
-        """Speak guard-approved text. Callers must have run the guard."""
+    async def _speak(self, text: str, *, spoken_value: str | None = None) -> None:
+        """Speak guard-approved text. Callers must have run the guard.
+        `spoken_value`: the user's value inside `text`, read out so the rep can write
+        it down (digits one by one, in their groups)."""
         if self.rt.taken_over:  # takeover may land between guard and speech
             return
-        await self.ports.control.speak(self.session.id, text)
+        text = clean_speech(text)
+        audio_text = text
+        if spoken_value:
+            audio_text = text.replace(spoken_value, for_speech(spoken_value))
+        await self.ports.control.speak(self.session.id, audio_text)
         self.session.disclosure_given = True
         redacted = audit_log.redact(text)
         self.rt.spoken.append(redacted)
+        self.rt.awaiting_reply = "?" in text
+        if guard.AGENT_WRAP_UP.search(text):
+            self.rt.closing_at_turn = self.rt.rep_turns
         self.ports.user.publish(
             LiveMessage(
                 type="caption",
@@ -409,7 +472,7 @@ class ToolExecutor:
         if isinstance(result.action, PressDigitsAction):
             await self.ports.control.press_digits(self.session.id, result.action.digits)
         elif isinstance(result.action, SayAction):
-            await self._speak(result.action.text)
+            await self._speak(result.action.text, spoken_value=answer)
         self.rt.one_shot_relay = None  # spoken once; from here on it is blocked and redacted
 
         await self.ports.audit(
@@ -419,10 +482,13 @@ class ToolExecutor:
             reason=f"answer relayed once by {relay_as}",
         )
         await self._back_to_conversation("ask_user answered and relayed")
+        # The relay is a complete turn: wait for the rep's reply instead of adding
+        # another line on top of it.
         return ToolOutcome(
             "The user answered and it was relayed to the rep once. You do not know the "
             "answer and must not repeat or guess it; if the rep needs it again, call "
-            "ask_user again."
+            "ask_user again. Wait for the rep's reply.",
+            stop=True,
         )
 
     async def _relay_failed(self, request: UserRequest, reason: str) -> ToolOutcome:
@@ -432,6 +498,48 @@ class ToolExecutor:
     async def _back_to_conversation(self, reason: str) -> None:
         if self.session.state == CallState.WAITING_ON_USER and not self.rt.taken_over:
             await self.ports.control.transition(self.session, CallState.IN_CONVERSATION, reason)
+
+    # ------------------------------------------------------------------ #
+    # share_info: what the user typed before the call
+    # ------------------------------------------------------------------ #
+
+    def _known_value(self, label: str) -> tuple[str, str] | None:
+        want = label.strip().lower()
+        for name, value in self.rt.known_info.items():
+            if name.lower() == want:
+                return name, value
+        for name, value in self.rt.known_info.items():  # "order number" vs "order #"
+            if want and (want in name.lower() or name.lower() in want):
+                return name, value
+        return None
+
+    async def share_info(self, label: str) -> ToolOutcome:
+        found = self._known_value(label)
+        if found is None:
+            given = ", ".join(self.rt.known_info) or "nothing"
+            return ToolOutcome(
+                f"the user didn't give {label!r} before the call (they gave: {given}). "
+                "Use ask_user.",
+                is_error=True,
+            )
+        name, value = found
+        # A fixed sentence, not one Claude writes: the rep hears exactly the value.
+        self.rt.one_shot_relay = value
+        try:
+            text = f"The {name.lower()} is {value}."
+            result = await guard.enforce(SayAction(text=text), self.rt, self.ports.audit)
+            if not result.allowed or not isinstance(result.action, SayAction):
+                return ToolOutcome(f"not shared: {result.reason}", is_error=True)
+            await self._speak(result.action.text, spoken_value=value)
+        finally:
+            self.rt.one_shot_relay = None
+        await self.ports.audit(
+            actor="agent",
+            action="known_info.shared",
+            subject=self.session.id,
+            reason=f"said the {name} the user gave before the call",
+        )
+        return ToolOutcome(f"The {name} was said to the rep. Wait for their reply.", stop=True)
 
     # ------------------------------------------------------------------ #
     # press_digits / end_call / request_takeover
@@ -485,6 +593,7 @@ class ToolExecutor:
 
     async def _suggest_takeover(self, reason: str) -> None:
         """Hold the rep and alert the user (visual + haptic). The user decides to take over."""
+        self.rt.takeover_suggested = True
         if not self.rt.taken_over:
             line = guard.check(SayAction(text=TAKEOVER_LINE), self.session, self.rt)
             if line.allowed and isinstance(line.action, SayAction):

@@ -248,7 +248,7 @@ class LiveMessage(BaseModel):
 
 
 class TelephonyClient(abc.ABC):
-    """Twilio (owned by `telephony`). Audio is 8 kHz mu-law, 20 ms frames."""
+    """The phone line for our own pipeline. Audio is 8 kHz mu-law, 20 ms frames."""
 
     @abc.abstractmethod
     async def place_call(self, session: CallSession) -> str:
@@ -310,7 +310,7 @@ class TTSClient(abc.ABC):
 
     @abc.abstractmethod
     def synthesize(self, text: str) -> AsyncIterator[bytes]:
-        """Stream Twilio-ready mu-law frames for `text`."""
+        """Stream phone-line mu-law frames (8 kHz, 20 ms) for `text`."""
 
     @abc.abstractmethod
     async def pregenerate(self, key: str, text: str) -> None:

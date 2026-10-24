@@ -15,6 +15,7 @@ records from every logger, not just ones logged directly on root.
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from backend.audit.log import redact
@@ -55,8 +56,12 @@ class RedactingFilter(logging.Filter):
             message = record.getMessage()
         except Exception:  # noqa: BLE001 - bad format args: fall back to the raw msg
             message = str(record.msg)
-        record.msg = redact(message)
-        record.args = None
+        clean = redact(message)
+        if clean != message or not isinstance(record.args, tuple):
+            record.msg = clean
+            record.args = None
+        # else: nothing to redact, so keep the args; some formatters (uvicorn's
+        # access log) unpack them.
         if record.exc_info and not record.exc_text:
             record.exc_text = logging.Formatter().formatException(record.exc_info)
         if record.exc_text:
@@ -113,10 +118,28 @@ def _use_meter(meter: Any) -> None:
     _enabled = meter is not None
 
 
+def _console_logs() -> None:
+    """On Azure, send our INFO logs to stdout too (Container Apps console logs), so a
+    failed startup step (e.g. Cartesia setup) is visible without App Insights."""
+    if not get_settings().azure_key_vault_url:
+        return  # local dev and tests keep Python's default logging
+    root = logging.getLogger()
+    if any(getattr(h, "_call4me_console", False) for h in root.handlers):
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    handler._call4me_console = True  # type: ignore[attr-defined]
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    for noisy in ("azure", "httpx", "httpcore", "urllib3", "opentelemetry"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
 def setup_telemetry(app: Any) -> bool:
     """Enable Application Insights if configured. Returns True when enabled."""
     if _enabled:
         return True
+    _console_logs()
     conn = get_settings().applicationinsights_connection_string
     if not conn:
         _install_everywhere()  # console logs get redacted too

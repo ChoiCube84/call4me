@@ -8,6 +8,7 @@ Claude (mock) conversation, ask_user, guard, takeover, and wrap-up.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -54,8 +55,10 @@ async def test_full_call_with_ask_user(mocks, caplog) -> None:
     assert any("No thank you" in line for line in agent_lines)  # upsell declined
 
     # Rule 2: the PIN is nowhere — API, audit log, live channel, logs.
-    assert PIN not in _dump(result)
-    assert PIN not in caplog.text
+    # Whole-word match: random hex ids in debug logs can contain the digits.
+    leaked = re.compile(rf"(?<![0-9a-f]){PIN}(?![0-9a-f])")
+    assert not leaked.search(_dump(result))
+    assert not leaked.search(caplog.text)
     assert any(a["action"] == "user_request.answered" for a in result["audit"])
 
 

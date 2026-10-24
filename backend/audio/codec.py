@@ -1,6 +1,6 @@
 """G.711 mu-law <-> 16-bit PCM, in pure Python (no audioop: removed in 3.13).
 
-Twilio Media Streams carry 8 kHz mu-law in 20 ms frames (160 bytes). Both
+Phone lines carry 8 kHz mu-law in 20 ms frames (160 bytes). Both
 directions use precomputed lookup tables, so per-frame cost is one table walk.
 """
 
@@ -105,6 +105,6 @@ class MulawFramer:
 
 
 def frame_mulaw(data: bytes) -> list[bytes]:
-    """Split mu-law audio into 20 ms Twilio frames, padding the tail with silence."""
+    """Split mu-law audio into 20 ms frames, padding the tail with silence."""
     framer = MulawFramer()
     return framer.push(data) + framer.flush()

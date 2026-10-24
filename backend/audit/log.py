@@ -64,9 +64,11 @@ def _all_secrets() -> list[str]:
 def _redact_str(text: str) -> str:
     for secret in _all_secrets():
         text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(secret)}(?![A-Za-z0-9])", REDACTED, text)
-        # Spoken digits often come back spaced out ("1 2 3 4").
-        if secret.isdigit() and len(secret) > 1:
-            spaced = r"[\s-]*".join(re.escape(c) for c in secret)
+        # Spoken digits often come back spaced out ("1 2 3 4"), and dashed numbers
+        # (order numbers like 112-4567890-1234567) lose or move their dashes.
+        digits = re.sub(r"\D", "", secret)
+        if len(digits) > 1 and re.fullmatch(r"[\d\s-]+", secret):
+            spaced = r"[\s-]*".join(digits)
             text = re.sub(rf"(?<!\d){spaced}(?!\d)", REDACTED, text)
     for pattern in _PATTERNS:
         text = pattern.sub(REDACTED, text)

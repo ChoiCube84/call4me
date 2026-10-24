@@ -21,15 +21,21 @@ struct SettingsView: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    SecureField("Access code", text: $settings.accessToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                     Button("Test connection") { Task { await test() } }
                     if let testResult { Text(testResult) }
                     Button("Use default address") {
                         settings.backendURL = AppSettings.defaultBackendURL
+                        if !AppSettings.defaultAccessToken.isEmpty {
+                            settings.accessToken = AppSettings.defaultAccessToken
+                        }
                     }
                 } header: {
                     Text("Server address")
                 } footer: {
-                    Text("On a real iPhone, use your computer's address or an ngrok https URL. localhost only works in the Simulator.")
+                    Text("Use the https address and access code from your call4me server. localhost only works in the Simulator.")
                 }
                 Section("Alerts") {
                     Button("Turn on alerts") {
@@ -49,6 +55,9 @@ struct SettingsView: View {
             _ = try await APIClient().searchCompanies("")
             testResult = "Connected."
             Haptics.success()
+        } catch APIError.badAccessCode {
+            testResult = APIError.badAccessCode.errorDescription
+            Haptics.error()
         } catch {
             testResult = "Can't connect. Check the address."
             Haptics.error()

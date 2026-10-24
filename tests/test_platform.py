@@ -10,7 +10,7 @@ from backend.audit import log as audit
 from backend.contracts import AgentAction, AskUserAction, PressDigitsAction, Sensitivity
 from backend.db.models import AppendOnlyError, AuditLogRow, UserRequestRow
 from backend.db.session import sessionmaker
-from backend.notify.live import answers
+from backend.notify.live import answers, hub
 
 CALL = {
     "company": "Fake Support Line (test)",
@@ -117,9 +117,14 @@ async def test_answer_is_delivered_but_never_stored(client) -> None:
         req_id = req.id
 
     waiter = answers.expect(req_id)
+    live = hub.subscribe(call_id)
     r = await client.post(f"/requests/{req_id}/answer", json={"answer": "zq4821"})
     assert r.status_code == 202 and r.json()["detail"] == "delivered"
     assert waiter.result() == "zq4821"
+    # Every screen closes the question; the event carries no answer.
+    closed = live.get_nowait()
+    assert closed.data == {"kind": "ask_user_answered", "request_id": req_id}
+    hub.unsubscribe(call_id, live)
 
     # Second answer is rejected.
     assert (
@@ -152,6 +157,23 @@ async def test_companies_and_health(client) -> None:
     assert r.status_code == 200 and len(r.json()) == 1
 
 
-async def test_twilio_status(client) -> None:
-    r = await client.post("/twilio/status", data={"CallSid": "CA1", "CallStatus": "ringing"})
-    assert r.status_code == 200
+async def test_known_info_is_used_but_never_stored(client) -> None:
+    order = "112-4567890-1234567"
+    body = {**CALL, "known_info": [{"label": "Order number", "value": order}]}
+    r = await client.post("/calls", json=body)
+    assert r.status_code == 201
+    assert order not in r.text
+    call_id = r.json()["id"]
+    assert order not in (await client.get(f"/calls/{call_id}")).text
+    assert order not in (await client.get(f"/calls/{call_id}/audit")).text
+    async with sessionmaker()() as db:
+        rows = (await db.execute(text("select * from audit_log"))).all()
+        rows += (await db.execute(text("select * from call_session"))).all()
+    assert order not in str(rows)
+
+
+async def test_known_info_rejects_card_numbers(client) -> None:
+    body = {**CALL, "known_info": [{"label": "Card", "value": "4111 1111 1111 1111"}]}
+    r = await client.post("/calls", json=body)
+    assert r.status_code == 422
+    assert "type it to them yourself" in r.text

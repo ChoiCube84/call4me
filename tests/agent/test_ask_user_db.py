@@ -21,6 +21,7 @@ from backend.db.models import AuditLogRow, UserRequestRow
 from backend.db.session import sessionmaker
 
 PIN = "4821"
+SPOKEN = " ".join(PIN)  # read to the rep digit by digit
 
 
 async def test_answer_endpoint_to_relay_never_persists_answer(client) -> None:
@@ -68,7 +69,7 @@ async def test_answer_endpoint_to_relay_never_persists_answer(client) -> None:
         user_answers(),
     )
     assert status == 202 and not outcome.is_error
-    assert ports.control.spoken[-1] == f"The PIN is {PIN}."
+    assert ports.control.spoken[-1] == f"The PIN is {SPOKEN}."
 
     async with sessionmaker()() as db:
         reqs = (await db.scalars(select(UserRequestRow))).all()

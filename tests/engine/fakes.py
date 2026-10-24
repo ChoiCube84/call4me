@@ -183,7 +183,7 @@ class Harness:
             )
         )
 
-    async def settle(self, seconds: float = 2.0) -> None:
+    async def settle(self, seconds: float = 3.0) -> None:
         self.clock.advance(seconds)
         await self.engine.tick()
 
@@ -193,6 +193,8 @@ class Harness:
 
         for _ in range(5):
             await asyncio.sleep(0)
+        # Real time passes while the (short, fake) greeting audio plays on the line.
+        self.clock.advance(0.5)
 
     @property
     def path(self) -> list[str]:

@@ -22,39 +22,64 @@
     <!-- Left column: start a call, join a call, recent calls          -->
     <!-- ------------------------------------------------------------ -->
     <aside class="side">
-      <section class="card">
-        <h2>Start a call</h2>
+      <section class="card start-card">
+        <div class="card-head">
+          <h2>Start a call</h2>
+          <button type="button" id="preset" class="ghost small-btn" title="Fill in the Amazon demo">Try demo</button>
+        </div>
         <form id="start-form" autocomplete="off">
           <label>Company
-            <input id="company" list="company-list" required placeholder="Search companies">
+            <input id="company" list="company-list" required placeholder="Amazon Customer Service">
             <datalist id="company-list"></datalist>
           </label>
           <label>Phone number
-            <input id="phone" required placeholder="+1…">
+            <input id="phone" type="tel" required placeholder="+1 …">
           </label>
-          <label>Goal
-            <textarea id="goal" rows="2" required placeholder="Remove the $40 late fee"></textarea>
+          <label>What do you need?
+            <textarea id="goal" rows="2" required placeholder="Get a refund for headphones that arrived damaged"></textarea>
           </label>
-          <label>Limits (plain words)
-            <input id="limits-notes" placeholder="No plan changes">
-          </label>
-          <div class="row">
-            <label class="small">Max hold (min)
-              <input id="max-hold" type="number" min="1" value="60">
-            </label>
-            <label class="small">Max spend ($)
-              <input id="max-spend" type="number" min="0" step="1" value="0">
-            </label>
+          <div class="chips" id="goal-chips" aria-label="Common requests">
+            <button type="button" class="chip" data-goal="Get a refund for an item that arrived damaged.">Refund</button>
+            <button type="button" class="chip" data-goal="Find out where my order is and when it will arrive.">Where's my order?</button>
+            <button type="button" class="chip" data-goal="Cancel my order before it ships.">Cancel order</button>
+            <button type="button" class="chip" data-goal="Start a return and get a return label.">Return</button>
           </div>
-          <label class="check"><input id="allow-plan" type="checkbox"> Allow plan changes</label>
-          <label class="check"><input id="allow-cancel" type="checkbox"> Allow cancellation</label>
-          <label>AI disclosure wording
-            <textarea id="disclosure" rows="3" required></textarea>
-          </label>
-          <div class="row">
-            <button type="button" id="preset" class="ghost">Demo preset</button>
-            <button type="submit" class="primary">Start call</button>
-          </div>
+          <p class="hint warn-text" id="goal-hint" hidden>Tip: put numbers like your order number under Info below. They're kept private there.</p>
+
+          <fieldset class="info">
+            <legend>Info the agent can share <span class="muted">(optional)</span></legend>
+            <div id="info-rows"></div>
+            <div class="chips" id="info-chips" aria-label="Add info">
+              <button type="button" class="chip add" data-label="Order number">+ Order number</button>
+              <button type="button" class="chip add" data-label="Name on account">+ Name</button>
+              <button type="button" class="chip add" data-label="Email on account">+ Email</button>
+              <button type="button" class="chip add" data-label="ZIP code">+ ZIP code</button>
+              <button type="button" class="chip add" data-label="">+ Other</button>
+            </div>
+            <p class="hint">Said only if the rep asks, then forgotten when the call ends. For anything else, the agent asks you. Never add card numbers, SSNs or passwords.</p>
+          </fieldset>
+
+          <details class="more" id="more">
+            <summary>Rules and AI introduction</summary>
+            <label class="check"><input id="allow-plan" type="checkbox"> Allow plan or subscription changes</label>
+            <label class="check"><input id="allow-cancel" type="checkbox"> Allow cancellation</label>
+            <div class="row">
+              <label class="small">Max hold (min)
+                <input id="max-hold" type="number" min="1" value="60">
+              </label>
+              <label class="small">Max spend ($)
+                <input id="max-spend" type="number" min="0" step="1" value="0">
+              </label>
+            </div>
+            <label>Other rules
+              <input id="limits-notes" placeholder="No new charges or subscriptions">
+            </label>
+            <label>AI introduction (said first)
+              <textarea id="disclosure" rows="3" required></textarea>
+            </label>
+          </details>
+
+          <button type="submit" class="primary block">Start call</button>
           <p class="form-msg" id="start-msg" role="status"></p>
         </form>
       </section>

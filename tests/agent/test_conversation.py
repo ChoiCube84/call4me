@@ -14,6 +14,7 @@ from backend.contracts import CallState
 from .test_ask_user import answer_when_asked
 
 PIN = "4821"
+SPOKEN = " ".join(PIN)  # read to the rep digit by digit
 
 
 def agent_for(session, ports, llm: LLMClient | None = None, **kw) -> ConversationAgent:
@@ -35,7 +36,7 @@ async def test_full_mock_call_with_ask_user(session, ports) -> None:
         agent.on_rep_turn("Sure. Can I get the PIN on the account?"),
         answer_when_asked(ports, PIN),
     )
-    assert ports.control.spoken.count(f"Sure, the pin is {PIN}.") == 1
+    assert ports.control.spoken.count(f"Sure, the pin is {SPOKEN}.") == 1
 
     # The rep reads the PIN back: it is redacted before it reaches Claude.
     await agent.on_rep_turn(f"Thanks, I have {PIN}. Would you like to upgrade to premium?")
@@ -44,6 +45,9 @@ async def test_full_mock_call_with_ask_user(session, ports) -> None:
     await agent.on_rep_turn("Okay. I've waived the fee. Your reference number is A7X291.")
     assert "A7X291" in ports.control.spoken[-1]
     await agent.on_rep_turn("Yes, that's correct.")
+    assert session.state != CallState.ENDED  # wraps up first; never hangs up on the rep
+    assert "Thank you" in ports.control.spoken[-1]
+    await agent.on_rep_turn("You're welcome. Have a good one.")
 
     assert session.state == CallState.ENDED
     assert ports.control.hung_up
@@ -173,3 +177,75 @@ def test_parse_menu_options() -> None:
         ("0", "speak to an agent"),
     ]
     assert any(o.spoken and o.key == "representative" for o in opts)
+
+
+async def test_stale_say_dropped_when_rep_spoke_mid_turn() -> None:
+    from backend.agent.ports import AgentRuntime, memory_ports
+    from backend.agent.tools import ToolExecutor
+    from backend.contracts import CallLimits, CallSession, CallState
+
+    session = CallSession(
+        user_id="u",
+        company="Acme",
+        phone_number="+1555",
+        goal="Remove the $40 late fee",
+        limits=CallLimits(),
+        disclosure_text="Hi, I'm an AI assistant calling on behalf of Sam.",
+        state=CallState.IN_CONVERSATION,
+        disclosure_given=True,
+    )
+    ports = memory_ports()
+    rt = AgentRuntime(session=session)
+    tools = ToolExecutor(rt, ports)
+    rt.unseen_rep = True
+    out = await tools.say("Is that something you can waive today?")
+    assert out.is_error and ports.control.spoken == []
+    rt.unseen_rep = False
+    assert not (await tools.say("Thank you.")).is_error
+
+
+ORDER = "112-4567890-1234567"
+
+
+async def test_info_given_before_the_call_is_shared_without_asking(session, ports) -> None:
+    from backend.audit import log as audit
+
+    audit.register_secret(session.id, ORDER)  # LiveCall does this at start
+    llm = MockLLMClient()
+    agent = agent_for(session, ports, llm, known_info={"order number": ORDER})
+    assert "order number" in agent.system_prompt and ORDER not in agent.system_prompt
+
+    await agent.on_rep_turn("Thanks for calling, how can I help you?")
+    await agent.on_rep_turn("Sure. Can I get the order number, please?")
+
+    # A fixed sentence, digits read one by one in their groups.
+    assert ports.control.spoken[-1] == "The order number is 1 1 2, 4 5 6 7 8 9 0, 1 2 3 4 5 6 7."
+    assert not any(m.type == "ask_user" for m in ports.user.live)  # no need to ask
+    assert ORDER not in everything_claude_saw(llm)
+    assert ORDER not in str(ports.audit.entries)
+    assert ORDER not in json.dumps([m.data for m in ports.user.live])  # captions redacted
+
+
+async def test_share_info_with_unknown_label_says_to_ask(session, ports) -> None:
+    agent = agent_for(session, ports, known_info={"order number": ORDER})
+    out = await agent.tools.execute("share_info", {"label": "date of birth"})
+    assert out.is_error and "ask_user" in out.content
+    assert ports.control.spoken == []
+
+
+def test_numbers_are_read_digit_by_digit_in_groups() -> None:
+    from backend.agent.tools import for_speech
+
+    assert for_speech("112-4567890-1234567") == "1 1 2, 4 5 6 7 8 9 0, 1 2 3 4 5 6 7"
+    assert for_speech("98109") == "9 8 1 0 9"
+    assert for_speech("A7X291") == "A 7 X 2 9 1"
+    assert for_speech("Jorge Ramos") == "Jorge Ramos"  # words stay words
+    assert for_speech("sam@example.com") == "sam@example.com"
+
+
+def test_markup_never_reaches_speech() -> None:
+    from backend.agent.tools import clean_speech
+
+    leaked = 'The order number is {answer}.</parameter> <parameter name="label">'
+    assert clean_speech(leaked) == "The order number is ."
+    assert clean_speech("Thanks, that's all.") == "Thanks, that's all."

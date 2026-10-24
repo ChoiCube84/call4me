@@ -1,4 +1,4 @@
-"""Twilio Media Streams audio format: 8 kHz, mono, G.711 mu-law, 20 ms frames.
+"""Phone-line audio format: 8 kHz, mono, G.711 mu-law, 20 ms frames.
 
 Pure-Python codec (stdlib `audioop` is deprecated and gone in 3.13). Decoding for
 the real pipeline belongs to `audio-speech`; telephony only needs this to

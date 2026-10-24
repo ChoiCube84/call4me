@@ -24,7 +24,19 @@ def _limits_lines(session: CallSession) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(session: CallSession) -> str:
+def _known_info_block(labels: list[str]) -> str:
+    if not labels:
+        return ""
+    return f"""
+<known_info>
+The user already gave you: {", ".join(labels)}. You cannot see the values. When the rep \
+asks for one of these, call `share_info` with its label and the system says it. Do not \
+call `ask_user` for these.
+</known_info>
+"""
+
+
+def build_system_prompt(session: CallSession, known_labels: list[str] | None = None) -> str:
     return f"""You are call4me, an AI assistant on a live phone call with a customer \
 service representative at {session.company}. You are calling on behalf of a Deaf or \
 hard-of-hearing user who follows the call through captions and answers by typing.
@@ -40,10 +52,11 @@ hard-of-hearing user who follows the call through captions and answers by typing
 <disclosure>
 {effective_disclosure(session)}
 </disclosure>
-
+{_known_info_block(known_labels or [])}
 How each turn works: you receive what the rep just said. Respond by calling tools. \
 Everything you want the rep to hear must go through `say`; plain text replies are not \
-spoken. Usually one short `say` per turn is right.
+spoken. Usually one short `say` per turn is right. To wait for the rep's reply, \
+stop calling tools; never call `ask_user` or `end_call` just to wait.
 
 Speaking style: this is a phone call. Keep each `say` to one or two short, natural \
 sentences. No lists, no markdown.
@@ -66,7 +79,12 @@ and steer back to the goal.
 6. Before `end_call`, read back the key details to the rep with `say` (amounts, dates, \
 the reference number), e.g. "Just to confirm, the $40 fee is waived and the reference \
 is A7X291?". Then call `end_call` with a plain-language summary for the user.
-7. If the rep refuses to talk to an AI, or you are stuck, call `request_takeover`.
+7. If the rep refuses to talk to an AI, or you are stuck, call `request_takeover`. \
+After that, keep the rep on the line and wait for the user; do not end the call.
+8. Never hang up on someone. End the call only when it is finished for both sides \
+(you wrapped up and the rep answered or said goodbye, or the rep asked "anything \
+else?" and you said goodbye), or when the rep has gone \
+silent and did not answer after you asked "Are you still there?" twice.
 """
 
 
@@ -79,10 +97,11 @@ GREETING_INSTRUCTION = (
 SUMMARY_INSTRUCTION = (
     "Summarize this call for the user in two or three short, plain sentences (English may "
     "be their second language). Say whether the goal was reached, what was agreed, and the "
-    "reference number if any. Reply with just the summary."
+    "reference number if any. Plain text only, no markdown. Reply with just the summary."
 )
 
 CAPTION_INSTRUCTION = (
     "Rewrite what the representative just said as one short, plain sentence for a Deaf "
-    "user reading captions. Keep numbers and names exact. Reply with just the sentence."
+    "user reading captions. Keep numbers and names exact. Plain text only, no markdown. "
+    "Reply with just the sentence."
 )

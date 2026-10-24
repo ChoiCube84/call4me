@@ -80,6 +80,12 @@ def parse_menu_options(text: str) -> dict[str, str]:
     return options
 
 
+def decline_callback_options(options: dict[str, str]) -> dict[str, str]:
+    """Keys that don't request a callback. Declining by pressing the only key on offer
+    ("To get a callback, press 1. Or stay on the line.") would accept it."""
+    return {k: v for k, v in options.items() if not jev_checks.CALLBACK_RE.search(v.lower())}
+
+
 def is_open_prompt(text: str) -> bool:
     return bool(_OPEN_PROMPT.search(text.lower()))
 
@@ -193,8 +199,21 @@ class MenuNavigator:
     jev_timeout_s: float = 2.0
     steps: list[str] = field(default_factory=list)
     repeats: dict[str, int] = field(default_factory=dict)
+    tried: dict[str, set[str]] = field(default_factory=dict)  # menu signature -> keys pressed
+    last_sig: str = ""
     escalations: int = 0
     last_decision: jev_checks.JevDecision | None = None
+
+    @property
+    def clean_path(self) -> bool:
+        """Worth remembering: short, no menu heard twice, no escalation.
+        A path with wrong turns would replay the wrong turns next time."""
+        return (
+            bool(self.steps)
+            and self.escalations == 0
+            and all(n <= 1 for n in self.repeats.values())
+            and len(self.steps) <= 4
+        )
 
     @property
     def loop_exceeded(self) -> bool:
@@ -221,6 +240,8 @@ class MenuNavigator:
     async def decide(self, options: dict[str, str], transcript: str) -> MenuAction | None:
         """Choose what to do with a fully-heard menu prompt. None means keep listening."""
         sig = menu_signature(options, transcript)
+        came_back = sig in self.tried and sig != self.last_sig
+        self.last_sig = sig
         self.repeats[sig] = self.repeats.get(sig, 0) + 1
         if self.repeats[sig] > self.max_repeats:
             self.repeats[sig] = 0  # give the escalation a fresh chance to work
@@ -241,10 +262,16 @@ class MenuNavigator:
             self.steps.append(action.key)
             return action
 
+        # Back at a menu after a branch from it didn't reach a person: offer Jev only
+        # the untried options. The same menu twice in a row is a missed press; repeat it.
+        tried = self.tried.setdefault(sig, set())
+        fresh = options
+        if came_back:
+            fresh = {k: v for k, v in options.items() if k not in tried} or options
         decision = await jev_checks.choose_menu_option(
             self.decisions,
             goal=self.goal,
-            menu_options=options,
+            menu_options=fresh,
             transcript=transcript,
             timeout_s=self.jev_timeout_s,
         )
@@ -259,5 +286,6 @@ class MenuNavigator:
             action = MenuAction.from_key(
                 decision.choice, f"jev chose {options[decision.choice]!r}", decision.probability
             )
+        tried.add(action.key)
         self.steps.append(action.key)
         return action

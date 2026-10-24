@@ -215,15 +215,38 @@ Denied attempts are logged to `audit_log` with `allowed=false`.
 
 ---
 
-## 11. iPhone app (`ios/Call4me`)
+## 11. Mobile web app (`web/`) — Plan C
 
-- **Start call:** pick company, type/dictate goal + limits, set disclosure wording (onboarding).
-- **Live view:** large captions of both sides + plain-language summaries; state banner.
-- **Live Activity + Dynamic Island:** Calling → Navigating menu → On hold (timer) → Person answered → Needs your input → Done.
-- **Alerts:** time-sensitive notifications with text-input action for `ask_user`; Apple Watch haptics. No sound-only cues.
-- **Takeover:** one button → type-to-talk view; hand back with one tap.
-- **Summary:** outcome, reference number, minutes saved.
-- Plain, short UI text (English may be a second language for ASL users).
+The native iOS app is shelved (`ios/` stays in the repo, unmaintained): a free Apple ID can't do push,
+installs expire every 7 days, and judges can't install it. Instead the user's phone runs a **mobile web
+app**, served by the Azure backend over HTTPS. Any phone opens it from a link, and "Add to Home
+Screen" makes it look like an app.
+
+- **Stack:** Next.js (App Router, TypeScript) + Tailwind, built as a static export (`web/out`) that
+  FastAPI serves at `/`. No Node server in production. Pages use query params (`/live/?id=…`), not
+  dynamic segments.
+- **Start (`/`):** company (from `GET /companies`), phone number, goal, limits, info the agent may
+  share (values used once, never saved in the browser), AI introduction → `POST /calls`.
+- **Live (`/live/?id=`):** large high-contrast captions and a state banner (with a hold timer) over
+  `WS /calls/{id}/live`. It reconnects automatically, and the server replays the call's recent
+  messages on every connect, so a phone that slept or changed network rebuilds the screen. Also
+  shows plain-language summaries and Hang up.
+- **Question sheet (`ask_user`):** full-screen color flash (a single color change with reduced
+  motion) plus vibration where supported, a big question, and a text input →
+  `POST /requests/{id}/answer`. The input clears at once. For `sensitivity=high` there is no answer
+  box, only **"Say it myself"** → takeover. It closes on the `ask_user_answered` live event.
+- **Take over (type-to-talk):** `POST /calls/{id}/takeover`, then `POST /calls/{id}/type` (spoken
+  verbatim). Quick phrases. Hand back with one tap.
+- **Summary (`/summary/?id=`):** outcome, reference number (large, copyable), minutes saved.
+- **Judges view (`/dashboard/`):** recent calls, eval metrics, a live call with its timeline and audit
+  log (denials highlighted, private values shown as `[REDACTED]`).
+- **Phone behavior:** Screen Wake Lock on the Live screen, a web app manifest for Add to Home Screen,
+  large text (adjustable), big touch targets, plain short English.
+- **Alerts are visual (+ vibration), never sound-only** (rule 7). Web push is a later stretch goal,
+  so the app must be open during a call.
+- **Access:** on Azure the API needs the access token (`API_TOKEN`). The app asks for it once, keeps it
+  in localStorage, and sends it as `Authorization: Bearer` (or `?token=` on the WebSocket).
+- The old plain-JS dashboard lives at `/console/` (backup, plus the phone-mode rep page `/phone`).
 
 ---
 

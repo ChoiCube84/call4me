@@ -10,6 +10,7 @@ from backend.agent.tools import HOLDING_LINE, STILL_WAITING_LINE, ToolExecutor
 from backend.contracts import CallState, UserRequestStatus
 
 PIN = "4821"
+SPOKEN = " ".join(PIN)  # read to the rep digit by digit
 
 
 def executor(runtime: AgentRuntime, ports, timeout: float = 1.0, grace: float = 1.0):
@@ -47,7 +48,7 @@ async def test_full_flow_speaks_once_and_never_stores_answer(runtime, ports) -> 
     )
 
     control = ports.control
-    assert control.spoken == [HOLDING_LINE, f"Sure, the PIN is {PIN}."]  # spoken exactly once
+    assert control.spoken == [HOLDING_LINE, f"Sure, the PIN is {SPOKEN}."]  # spoken exactly once
     states = [s for s, _ in control.transitions]
     assert states == [CallState.WAITING_ON_USER, CallState.IN_CONVERSATION]
     assert runtime.session.state == CallState.IN_CONVERSATION
@@ -94,7 +95,7 @@ async def test_answer_during_grace_period_is_relayed(runtime, ports) -> None:
         ex.execute("ask_user", ask_input()), answer_when_asked(ports, PIN, delay=0.05)
     )
     assert not outcome.is_error
-    assert ports.control.spoken == [HOLDING_LINE, STILL_WAITING_LINE, f"Sure, the PIN is {PIN}."]
+    assert ports.control.spoken == [HOLDING_LINE, STILL_WAITING_LINE, f"Sure, the PIN is {SPOKEN}."]
 
 
 async def test_high_sensitivity_never_asked_suggests_takeover(runtime, ports) -> None:

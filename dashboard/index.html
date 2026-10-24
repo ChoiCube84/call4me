@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>call4me — live dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">call4me <span class="muted">live dashboard</span></div>
+    <nav>
+      <a href="#live">Live</a>
+      <a href="#records">Timeline + audit</a>
+      <a href="#evals">Evals</a>
+    </nav>
+    <div class="conn" id="conn" data-status="idle">No call</div>
+  </header>
+
+  <main class="layout">
+    <!-- ------------------------------------------------------------ -->
+    <!-- Left column: start a call, join a call, recent calls          -->
+    <!-- ------------------------------------------------------------ -->
+    <aside class="side">
+      <section class="card">
+        <h2>Start a call</h2>
+        <form id="start-form" autocomplete="off">
+          <label>Company
+            <input id="company" list="company-list" required placeholder="Search companies">
+            <datalist id="company-list"></datalist>
+          </label>
+          <label>Phone number
+            <input id="phone" required placeholder="+1…">
+          </label>
+          <label>Goal
+            <textarea id="goal" rows="2" required placeholder="Remove the $40 late fee"></textarea>
+          </label>
+          <label>Limits (plain words)
+            <input id="limits-notes" placeholder="No plan changes">
+          </label>
+          <div class="row">
+            <label class="small">Max hold (min)
+              <input id="max-hold" type="number" min="1" value="60">
+            </label>
+            <label class="small">Max spend ($)
+              <input id="max-spend" type="number" min="0" step="1" value="0">
+            </label>
+          </div>
+          <label class="check"><input id="allow-plan" type="checkbox"> Allow plan changes</label>
+          <label class="check"><input id="allow-cancel" type="checkbox"> Allow cancellation</label>
+          <label>AI disclosure wording
+            <textarea id="disclosure" rows="3" required></textarea>
+          </label>
+          <div class="row">
+            <button type="button" id="preset" class="ghost">Demo preset</button>
+            <button type="submit" class="primary">Start call</button>
+          </div>
+          <p class="form-msg" id="start-msg" role="status"></p>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Join a call</h2>
+        <form id="join-form" class="row" autocomplete="off">
+          <input id="join-id" placeholder="Call id" required>
+          <button type="submit">Join</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Recent calls</h2>
+          <button type="button" id="refresh-calls" class="ghost small-btn">Refresh</button>
+        </div>
+        <ul id="recent-calls" class="recent"></ul>
+      </section>
+    </aside>
+
+    <!-- ------------------------------------------------------------ -->
+    <!-- Live view                                                     -->
+    <!-- ------------------------------------------------------------ -->
+    <section id="live" class="live">
+      <div class="banner" id="banner" data-state="NONE">
+        <div class="banner-main">
+          <div class="banner-label">Now</div>
+          <div class="banner-state" id="banner-state">No call yet</div>
+          <div class="banner-sub" id="banner-sub">Start or join a call.</div>
+        </div>
+        <div class="banner-timers">
+          <div><span class="timer-label">Call</span><span class="timer" id="call-timer">0:00</span></div>
+          <div><span class="timer-label">On hold</span><span class="timer" id="hold-timer">0:00</span></div>
+        </div>
+      </div>
+
+      <ol class="path" id="state-path" aria-label="Call state machine"></ol>
+
+      <div class="stats" id="stats">
+        <div class="stat"><span class="stat-n" id="stat-jev">0</span><span class="stat-l">Jev decisions</span></div>
+        <div class="stat"><span class="stat-n" id="stat-menu">0</span><span class="stat-l">Menu actions</span></div>
+        <div class="stat"><span class="stat-n" id="stat-asks">0</span><span class="stat-l">Asked user</span></div>
+        <div class="stat deny"><span class="stat-n" id="stat-deny">0</span><span class="stat-l">Guard blocks</span></div>
+        <div class="stat"><span class="stat-n" id="stat-greet">–</span><span class="stat-l">Time to greet</span></div>
+      </div>
+
+      <!-- Pending ask_user requests (test web page for build step 11). -->
+      <div id="asks"></div>
+
+      <div class="live-grid">
+        <section class="card captions-card">
+          <div class="card-head">
+            <h2>Captions</h2>
+            <div class="legend">
+              <span class="who remote">Rep</span><span class="who agent">Agent</span><span class="who user">You</span>
+            </div>
+          </div>
+          <div id="captions" class="captions" aria-live="polite"></div>
+        </section>
+
+        <section class="card events-card">
+          <h2>Decisions and events</h2>
+          <ul id="events" class="events"></ul>
+        </section>
+      </div>
+
+      <section class="card controls">
+        <div class="row wrap">
+          <button type="button" id="btn-takeover" class="warn" disabled>Take over</button>
+          <button type="button" id="btn-handback" disabled>Hand back to agent</button>
+          <button type="button" id="btn-cancel" class="danger" disabled>Cancel call</button>
+          <span class="form-msg" id="control-msg" role="status"></span>
+        </div>
+        <form id="type-form" class="row" autocomplete="off">
+          <input id="type-text" placeholder="Type to talk (spoken to the rep word for word)" maxlength="1000" disabled>
+          <button type="submit" id="type-send" disabled>Speak</button>
+        </form>
+      </section>
+
+      <section class="card summary-card" id="summary-card" hidden>
+        <h2>Call summary</h2>
+        <p id="sum-text" class="sum-text"></p>
+        <div class="sum-facts">
+          <div><span class="stat-l">Reference</span><span class="sum-big" id="sum-ref">–</span></div>
+          <div><span class="stat-l">Minutes saved</span><span class="sum-big" id="sum-saved">–</span></div>
+          <div><span class="stat-l">Call length</span><span class="sum-big" id="sum-len">–</span></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <!-- -------------------------------------------------------------- -->
+  <!-- Timeline + audit                                                -->
+  <!-- -------------------------------------------------------------- -->
+  <section id="records" class="wide">
+    <div class="card">
+      <div class="card-head">
+        <h2>Timeline</h2>
+        <button type="button" id="refresh-records" class="ghost small-btn">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="timeline-table">
+          <thead><tr><th>Time</th><th>Kind</th><th>State</th><th>Conf.</th><th>Detail</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="muted" id="timeline-msg"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Audit log <span class="muted">(append-only)</span></h2>
+        <label class="check"><input type="checkbox" id="audit-denials-only"> Denials only</label>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="audit-table">
+          <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Allowed</th><th>Reason</th><th>Evidence</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="muted" id="audit-msg"></p>
+    </div>
+  </section>
+
+  <!-- -------------------------------------------------------------- -->
+  <!-- Eval metrics                                                    -->
+  <!-- -------------------------------------------------------------- -->
+  <section id="evals" class="wide">
+    <div class="card">
+      <div class="card-head">
+        <h2>Eval suite</h2>
+        <button type="button" id="refresh-metrics" class="ghost small-btn">Refresh</button>
+      </div>
+      <p class="muted" id="metrics-meta"></p>
+      <div class="stats" id="metrics-summary"></div>
+      <div class="table-wrap">
+        <table class="table" id="metrics-table">
+          <thead><tr>
+            <th>Scenario</th><th>Result</th><th class="num">Min. saved</th><th class="num">Asks</th>
+            <th class="num">Guard blocks</th><th class="num">Greet (ms)</th><th class="num">Errors</th><th>Notes</th>
+          </tr></thead>
+          <tbody></tbody>
+          <tfoot></tfoot>
+        </table>
+      </div>
+      <p class="muted" id="metrics-msg"></p>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

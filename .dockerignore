@@ -1,0 +1,8 @@
+.env
+.env.*
+.venv
+.git
+.claude
+ios
+dashboard
+**/__pycache__

@@ -69,8 +69,22 @@ def resolve_guard(
         return reference_guard.check, "reference (evals stand-in; real guard not merged)"
 
 
-async def apply_guard(fn: GuardFn, action: AgentAction, session: CallSession) -> GuardResult:
-    result = fn(action, session)
+def _accepts_runtime(fn: GuardFn) -> bool:
+    try:
+        return len(inspect.signature(fn).parameters) >= 3
+    except (TypeError, ValueError):
+        return False
+
+
+async def apply_guard(
+    fn: GuardFn, action: AgentAction, session: CallSession, runtime: object | None = None
+) -> GuardResult:
+    # The real guard reads per-call runtime (one-shot relay, what was said); pass it when supported.
+    result = (
+        fn(action, session, runtime)
+        if runtime is not None and _accepts_runtime(fn)
+        else fn(action, session)
+    )  # type: ignore[call-arg]
     if inspect.isawaitable(result):
         result = await result
     if not isinstance(result, GuardResult):

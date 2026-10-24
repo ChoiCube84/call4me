@@ -24,9 +24,11 @@ from collections.abc import Iterable
 
 from backend.audit.log import redact
 from backend.contracts import (
+    TERMINAL_STATES,
     AgentAction,
     AskUserAction,
     CallSession,
+    CallState,
     EndCallAction,
     GuardResult,
     PressDigitsAction,
@@ -301,9 +303,10 @@ def check(
     action: AgentAction, session: CallSession, runtime: AgentRuntime | None = None
 ) -> GuardResult:
     """Decide whether `action` may run. May return a rewritten action."""
-    if runtime is not None and runtime.taken_over and not isinstance(action, RequestTakeoverAction):
+    taken_over = session.state == CallState.TAKEOVER or (runtime is not None and runtime.taken_over)
+    if taken_over and not isinstance(action, RequestTakeoverAction):
         return _deny("the user has taken over the call; the agent may not act")
-    if runtime is not None and runtime.ended:
+    if session.state in TERMINAL_STATES or (runtime is not None and runtime.ended):
         return _deny("the call has ended")
 
     if isinstance(action, SayAction):

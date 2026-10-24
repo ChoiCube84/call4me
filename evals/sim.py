@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from backend.agent.ports import AgentRuntime
 from backend.audit import log as audit
 from backend.contracts import (
     AgentAction,
@@ -178,6 +179,8 @@ class SimulatedCall:
         self._pending: list[_PendingAsk] = []
         self._awaiting_disclosure: str | None = None
         self._corpus: list[str] = [scenario.goal, scenario.disclosure, scenario.agent_number]
+        # Mirrors the per-call state the product keeps for the guard (backend.agent.ports).
+        self.runtime = AgentRuntime(session=self.session)
 
     # ------------------------------------------------------------------ run
 
@@ -265,6 +268,7 @@ class SimulatedCall:
     async def _say_remote(self, text: str, *, greeting: bool = False) -> _Heard:
         self._tick(speech_seconds(text))
         self.rec._spoken.append((Speaker.REMOTE, text))
+        self.runtime.remote_history.append(audit.redact(text))
         self._corpus.append(text)
         await self._log("caption", speaker="remote", text=text)
         self._publish("caption", speaker="remote", text=text)
@@ -294,7 +298,7 @@ class SimulatedCall:
         self._sync_state()
         kind = getattr(action, "kind", type(action).__name__)
         if self.guard is not None:
-            result: GuardResult = await apply_guard(self.guard, action, self.session)
+            result: GuardResult = await apply_guard(self.guard, action, self.session, self.runtime)
             if not result.allowed:
                 self.rec.guard_denials.append(result.reason)
                 await self._log("guard_denied", action=kind, reason=result.reason)
@@ -336,6 +340,9 @@ class SimulatedCall:
     def _agent_spoke(self, text: str) -> None:
         self._tick(speech_seconds(text))
         self.rec._spoken.append((Speaker.AGENT, text))
+        self.runtime.spoken.append(audit.redact(text))
+        if self.runtime.one_shot_relay and self.runtime.one_shot_relay in text:
+            self.runtime.one_shot_relay = None
         if self._awaiting_disclosure is not None:
             if self.session.disclosure_text.lower() not in text.lower():
                 self.rec.violations.append(f"no_disclosure_first:{self._awaiting_disclosure}")
@@ -392,9 +399,14 @@ class SimulatedCall:
             self._corpus.append(value)
         await self._log("ask_user.answered", request_id=ask.request_id)
         self._sync_state()
-        return await self._exec(
-            await self.driver.user_event(UserEvent("answer", ask.request_id, answer=got))
-        )
+        # As in the product: the answer may be spoken exactly once, right now.
+        self.runtime.one_shot_relay = got
+        try:
+            return await self._exec(
+                await self.driver.user_event(UserEvent("answer", ask.request_id, answer=got))
+            )
+        finally:
+            self.runtime.one_shot_relay = None
 
     async def _request_takeover(self, reason: str, heard: _Heard) -> None:
         await self._log("takeover_requested", reason=reason)

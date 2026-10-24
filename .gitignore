@@ -1,0 +1,23 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Xcode
+ios/**/xcuserdata/
+ios/**/DerivedData/
+*.xcuserstate
+
+# Node
+node_modules/
+.next/

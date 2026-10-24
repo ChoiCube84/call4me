@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     apns_team_id: str = ""
     apns_auth_key_path: str = ""
     apns_topic: str = ""
+    apns_auth_key: str = ""  # .p8 contents (Key Vault "apns-auth-key"); beats the path
+    apns_use_sandbox: bool = True
 
     applicationinsights_connection_string: str = ""
     azure_key_vault_url: str = ""
@@ -47,6 +49,7 @@ _SECRET_FIELDS = (
     "azure_foundry_key",
     "database_url",
     "applicationinsights_connection_string",
+    "apns_auth_key",
 )
 
 

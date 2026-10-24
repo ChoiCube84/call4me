@@ -21,8 +21,6 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("USE_MOCKS", "true")
-
 from evals.product import ComponentMissing, resolve_driver, resolve_guard  # noqa: E402
 from evals.scenario import Scenario  # noqa: E402
 from evals.scenarios import BY_ID, SCENARIOS  # noqa: E402
@@ -86,6 +84,8 @@ def _print(results: list[ScenarioResult], m: SuiteMetrics, meta: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Only when run as a CLI: importing this module (tests) must not change the env.
+    os.environ.setdefault("USE_MOCKS", "true")
     p = argparse.ArgumentParser(prog="evals.run")
     p.add_argument("--driver", default="baseline")
     p.add_argument("--guard", default="auto", choices=["auto", "real", "reference", "none"])

@@ -21,6 +21,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend import telemetry
 from backend.agent import conversation
 from backend.agent.helpers import caption_summary, post_call_summary
 from backend.agent.llm import LLMClient, MockLLMClient
@@ -555,8 +556,11 @@ class _LiveDenials:
 
     async def __call__(self, **kwargs: Any) -> None:
         await self.inner(**kwargs)
+        if kwargs.get("action") == "user_request.created":
+            telemetry.record_metric(telemetry.ASK_USER_COUNT, 1)
         if kwargs.get("actor") == "guard" and not kwargs.get("allowed", True):
             evidence = kwargs.get("evidence") or {}
+            telemetry.record_metric(telemetry.GUARD_DENIALS, 1, action=evidence.get("kind"))
             hub.publish(
                 LiveMessage(
                     type="event",
@@ -600,17 +604,15 @@ def _read_back_reference(spoken: list[str]) -> str | None:
 
 
 def _record_metrics(call: LiveCall) -> None:
-    try:
-        from backend.telemetry import record_metric
-    except ImportError:
-        return
     s = call.session
     ok = s.state == CallState.ENDED and call.agent is not None and call.agent.runtime.ended
-    record_metric("call.completed", 1.0 if ok else 0.0, state=s.state.value)
+    telemetry.record_metric(
+        telemetry.CALL_COMPLETED, 1, success=ok, outcome=call.engine.outcome or s.state.value
+    )
     if s.minutes_saved is not None:
-        record_metric("call.minutes_saved", s.minutes_saved)
+        telemetry.record_metric(telemetry.MINUTES_SAVED, s.minutes_saved)
     if call.engine.time_to_greet_s is not None:
-        record_metric("call.time_to_greet_s", call.engine.time_to_greet_s)
+        telemetry.record_metric(telemetry.TIME_TO_GREET_MS, call.engine.time_to_greet_s * 1000)
 
 
 # --------------------------------------------------------------------------- #

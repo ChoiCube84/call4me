@@ -45,7 +45,9 @@ from backend.db.models import (
     UserRequestRow,
 )
 from backend.db.session import get_db, init_db
+from backend.notify.apns import close_notifier
 from backend.notify.live import answers, hub
+from backend.telemetry import setup_telemetry
 from backend.telephony import media_ws
 from backend.telephony.routes import router as twilio_router
 from backend.telephony.signature import verify_twilio_request
@@ -71,9 +73,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     callbacks.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await callbacks
+    await close_notifier()
 
 
 app = FastAPI(title="call4me", lifespan=lifespan)
+setup_telemetry(app)  # no-op without APPLICATIONINSIGHTS_CONNECTION_STRING
 # Tests turn this off to exercise the API without running a call pipeline.
 app.state.start_calls = True
 app.include_router(twilio_router)

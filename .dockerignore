@@ -4,5 +4,6 @@
 .git
 .claude
 ios
-dashboard
+infra
+tests
 **/__pycache__

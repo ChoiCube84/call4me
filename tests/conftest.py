@@ -21,6 +21,7 @@ async def db(tmp_path) -> AsyncIterator[None]:
 async def client(db) -> AsyncIterator[AsyncClient]:
     from backend.main import app
 
+    app.state.start_calls = False  # API only; tests/integration/test_live_call.py runs calls
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 

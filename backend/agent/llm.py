@@ -169,13 +169,18 @@ class MockLLMClient(LLMClient):
 
     def _rules(self, rep: str) -> list[ToolCall]:
         low = rep.lower()
+        # Reps often spell references out ("A 7 X 2 9 1"); collapse the spaces.
         ref = re.search(
-            r"\b(?:reference|confirmation)(?: number)?(?: is)?[:\s]+([A-Z0-9-]{4,})", rep, re.I
+            r"\b(?:reference|confirmation)(?: number)?(?: is)?[:\s]+((?:[A-Z0-9-] ?){4,})",
+            rep,
+            re.I,
         )
         if ref:
-            self._reference = ref.group(1).upper()
+            self._reference = ref.group(1).replace(" ", "").upper()
             return [_tool("say", text=f"Just to confirm, the reference is {self._reference}?")]
-        if self._reference and re.search(r"\b(yes|correct|that's right|right)\b", low):
+        if self._reference and re.search(
+            r"\b(yes|correct|that's right|right|goodbye|have a great day)\b", low
+        ):
             return [
                 _tool("say", text="Thank you so much for your help today."),
                 _tool(

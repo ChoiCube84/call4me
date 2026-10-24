@@ -12,3 +12,7 @@ web/.next
 web/out
 dev.db
 web/.env*
+
+node_modules
+.convex
+.runtime

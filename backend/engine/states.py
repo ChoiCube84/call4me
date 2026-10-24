@@ -128,10 +128,10 @@ class DbRecorder:
     async def transition(self, record: TransitionRecord) -> None:
         from backend.audit import log as audit
         from backend.db.models import CallSessionRow
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
         from backend.notify.live import hub
 
-        async with sessionmaker()() as db:
+        async with open_store() as db:
             await audit.append(
                 db,
                 actor=record.actor,
@@ -174,10 +174,10 @@ class DbRecorder:
 
     async def event(self, event: CallEvent, *, audit_action: str | None = None) -> None:
         from backend.audit import log as audit
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
         from backend.notify.live import hub
 
-        async with sessionmaker()() as db:
+        async with open_store() as db:
             await audit.record_event(db, event)
             if audit_action:
                 await audit.append(

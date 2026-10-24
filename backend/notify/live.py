@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, defaultdict, deque
+from collections.abc import Callable
 
 from backend.audit.log import redact
 from backend.contracts import LiveMessage
@@ -26,6 +27,7 @@ class LiveHub:
     def __init__(self) -> None:
         self._subs: dict[str, set[asyncio.Queue[LiveMessage]]] = defaultdict(set)
         self._backlog: OrderedDict[str, deque[LiveMessage]] = OrderedDict()
+        self.sink: Callable[[LiveMessage], None] | None = None
 
     def subscribe(self, session_id: str, *, replay: bool = False) -> asyncio.Queue[LiveMessage]:
         """`replay`: the queue starts with the call's recent messages (reconnects)."""
@@ -49,6 +51,8 @@ class LiveHub:
             while len(self._backlog) > BACKLOG_CALLS:
                 self._backlog.popitem(last=False)
         log.append(msg)
+        if self.sink is not None:
+            self.sink(msg)
         for q in list(self._subs.get(msg.session_id, ())):
             if q.full():  # slow client: drop its oldest message rather than block the call
                 q.get_nowait()

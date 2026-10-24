@@ -185,9 +185,9 @@ class DbAuditSink:
         reason: str = "",
         evidence: dict[str, Any] | None = None,
     ) -> None:
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
 
-        async with sessionmaker()() as db:
+        async with open_store() as db:
             await audit.append(
                 db,
                 actor=actor,
@@ -203,9 +203,9 @@ class DbAuditSink:
 class DbRequestStore:
     async def create(self, request: UserRequest) -> None:
         from backend.db.models import UserRequestRow
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
 
-        async with sessionmaker()() as db:
+        async with open_store() as db:
             db.add(
                 UserRequestRow(
                     id=request.id,
@@ -220,9 +220,9 @@ class DbRequestStore:
 
     async def set_status(self, request_id: str, status: UserRequestStatus) -> None:
         from backend.db.models import UserRequestRow
-        from backend.db.session import sessionmaker
+        from backend.db.store import open_store
 
-        async with sessionmaker()() as db:
+        async with open_store() as db:
             row = await db.get(UserRequestRow, request_id)
             # Never downgrade an answer the endpoint already recorded.
             if row is not None and row.status == UserRequestStatus.PENDING:

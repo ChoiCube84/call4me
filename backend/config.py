@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +28,9 @@ class Settings(BaseSettings):
     azure_foundry_key: str = ""
 
     database_url: str = "postgresql+asyncpg://call4me:call4me@localhost:5432/call4me"
+    storage_backend: Literal["sql", "convex"] = "sql"
+    convex_url: str = ""
+    convex_backend_token: str = ""
 
     apns_key_id: str = ""
     apns_team_id: str = ""
@@ -66,6 +70,7 @@ _SECRET_FIELDS = (
     "anthropic_api_key",
     "azure_foundry_key",
     "database_url",
+    "convex_backend_token",
     "applicationinsights_connection_string",
     "apns_auth_key",
     "api_token",

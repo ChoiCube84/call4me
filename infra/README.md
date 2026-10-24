@@ -96,3 +96,11 @@ same name. To redeploy into a fresh group sooner, run
 - Shared call state in Redis so the app can scale beyond one replica, plus a second
   region.
 - Azure Communication Services for telephony, with per-call cost tracking.
+
+## Convex storage
+
+Set `STORAGE_BACKEND=convex`, `CONVEX_URL`, and `CONVEX_BACKEND_TOKEN` in the deployment
+env file. The script passes the public Convex URL to the web build and stores the
+worker token in Key Vault. The template skips PostgreSQL provisioning. Deploy
+Convex functions first, and set `CALL4ME_VIEWER_TOKEN` in Convex to the same value
+as the worker `API_TOKEN`. See [the migration guide](../docs/convex-migration.md).

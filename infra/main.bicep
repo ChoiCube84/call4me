@@ -17,10 +17,14 @@ param postgresAdminLogin string = 'call4me'
 
 @secure()
 @description('PostgreSQL admin password. Stored in Key Vault as part of `database-url`.')
-param postgresAdminPassword string
+param postgresAdminPassword string = ''
 
 @description('Object ID of the person running the deploy, granted Key Vault Secrets Officer so deploy.sh can set secrets. Empty to skip.')
 param deployerPrincipalId string = ''
+
+@allowed(['sql', 'convex'])
+param storageBackend string = 'sql'
+param convexUrl string = ''
 
 // ---- Non-secret app settings (passed as plain env vars) ----
 @description('Who places calls: cartesia (a Cartesia agent dials real numbers) or phone (fake line; the /phone page plays the rep).')
@@ -128,11 +132,11 @@ resource kvSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04-01' =
 // deploy.sh; they are not created here with placeholder values because config.py
 // would load a placeholder as a real value, and a redeploy would overwrite real
 // secrets. Names use dashes: config.py maps `cartesia_api_key` -> `cartesia-api-key`.
-resource databaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource databaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (storageBackend == 'sql') {
   parent: vault
   name: 'database-url'
   properties: {
-    value: 'postgresql+asyncpg://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgres.properties.fullyQualifiedDomainName}:5432/call4me?ssl=require'
+    value: 'postgresql+asyncpg://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgres!.properties.fullyQualifiedDomainName}:5432/call4me?ssl=require'
   }
 }
 
@@ -145,7 +149,7 @@ resource appInsightsSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
 }
 
 // ---------------------------------------------------------------- postgres
-resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
+resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = if (storageBackend == 'sql') {
   name: pgName
   location: location
   sku: {
@@ -166,7 +170,7 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   }
 }
 
-resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
+resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = if (storageBackend == 'sql') {
   parent: postgres
   name: 'call4me'
   properties: {
@@ -176,7 +180,7 @@ resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08
 }
 
 // 0.0.0.0 - 0.0.0.0 is Azure's "allow access from Azure services" rule.
-resource postgresAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
+resource postgresAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = if (storageBackend == 'sql') {
   parent: postgres
   name: 'AllowAllAzureServices'
   properties: {
@@ -246,6 +250,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
             { name: 'PUBLIC_BASE_URL', value: 'https://${appFqdn}' }
             { name: 'USE_MOCKS', value: 'false' }
+            { name: 'STORAGE_BACKEND', value: storageBackend }
+            { name: 'CONVEX_URL', value: convexUrl }
             { name: 'TELEPHONY', value: telephony }
             { name: 'CARTESIA_VOICE_ID', value: cartesiaVoiceId }
             { name: 'CARTESIA_AGENT_MODEL', value: cartesiaAgentModel }
@@ -288,5 +294,5 @@ output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
 output keyVaultName string = vault.name
 output keyVaultUrl string = vault.properties.vaultUri
-output postgresHost string = postgres.properties.fullyQualifiedDomainName
+output postgresHost string = storageBackend == 'sql' ? postgres!.properties.fullyQualifiedDomainName : ''
 output identityClientId string = identity.properties.clientId

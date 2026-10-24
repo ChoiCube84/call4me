@@ -123,9 +123,9 @@ class MockNotifier(Notifier):
 async def _lookup_device_tokens(user_id: str) -> tuple[str | None, str | None]:
     """(apns_token, live_activity_token) for a user, from the `device` table."""
     from backend.db.models import DeviceRow
-    from backend.db.session import sessionmaker
+    from backend.db.store import open_store
 
-    async with sessionmaker()() as db:
+    async with open_store() as db:
         row = await db.get(DeviceRow, user_id)
         if row is None:
             return None, None

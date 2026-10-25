@@ -71,6 +71,8 @@ node scripts/make-icons.mjs   # regenerate the PWA icons in public/
 ## Convex live updates
 
 Set `NEXT_PUBLIC_CONVEX_URL` at build time to subscribe to Convex replay instead of
-the worker WebSocket. Call controls and private answers still use the Python API.
-See [Convex setup](../docs/convex-migration.md) for matching credentials, deployment,
-retention, and fallback behavior. Leave the URL empty for existing installations.
+the worker WebSocket. The always-on deployment serves this static app and its call
+controls from Convex HTTP actions on the same `.convex.site` origin. Private answers
+are encrypted temporarily in Convex until the waiting Cartesia tool receives them.
+See [Convex always-on deployment](../docs/convex-always-on.md). Leave the URL empty
+for legacy local installations.

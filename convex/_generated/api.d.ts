@@ -9,8 +9,13 @@
  */
 
 import type * as crons from "../crons.js";
+import type * as http from "../http.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as live from "../live.js";
+import type * as maintenance from "../maintenance.js";
+import type * as managed from "../managed.js";
+import type * as phone from "../phone.js";
+import type * as site from "../site.js";
 import type * as storage from "../storage.js";
 
 import type {
@@ -21,8 +26,13 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   crons: typeof crons;
+  http: typeof http;
   "lib/auth": typeof lib_auth;
   live: typeof live;
+  maintenance: typeof maintenance;
+  managed: typeof managed;
+  phone: typeof phone;
+  site: typeof site;
   storage: typeof storage;
 }>;
 

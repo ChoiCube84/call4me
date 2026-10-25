@@ -31,8 +31,9 @@ you need to see it **while it's happening**. That idea is the core of call4me.
 
 - **It asks only for what only you know.** When the rep needs your PIN or a choice
   between two appointment times, your whole screen flashes and the phone vibrates. You
-  type the answer, the agent relays it by voice or the requested keypad tones, and it's redacted from every log, caption, and
-  database.
+  type the answer, the agent relays it by voice or the requested keypad tones. The answer is
+  encrypted briefly in Convex, removed as soon as the waiting tool receives it, and redacted
+  from logs and captions.
 - **It stays inside your limits.** If the rep offers something you didn't ask for, like a
   faster plan for $10 more a month, the agent checks it against your limits and politely
   declines.
@@ -62,41 +63,41 @@ you need to see it **while it's happening**. That idea is the core of call4me.
 ## How it works
 
 ```
-Phone browser: web app (/)  ──REST + WebSocket (token)──▶  Backend (FastAPI) on Azure Container Apps
-Judges view (/dashboard/)                                   ├─ serves the web app (static Next.js export)
-                                                            ├─ Phone-mode state engine ── Jev (TypeSafe) decisions
-                                                            ├─ Claude: conversation, greeting, summaries
-                                                            ├─ Guard: disclosure, privacy, limits (in code)
-                                                            ├─ Convex (or PostgreSQL) · Key Vault · Application Insights
-                                                            ▼
-                                   Cartesia: voice agent that dials the company (TELEPHONY=cartesia)
-                                   or our own pipeline + fake line (TELEPHONY=phone)
+Phone browser: static web app on Convex .site ── REST + subscriptions ──▶ Convex
+Judges view (/dashboard/)                                           ├─ HTTP actions: calls, tools, webhooks
+                                                                    ├─ call state, audit, live captions
+                                                                    ├─ encrypted short-lived answer mailbox
+                                                                    ▼
+                                              Cartesia: managed voice agent and phone line
 ```
 
-The backend is the referee in the middle. Every caption, question, and offer passes
-through it, and nothing is stored or shown until it has been redacted.
+The production app, call API, Cartesia webhooks and live subscriptions run on Convex;
+they do not need the developer's laptop or a temporary tunnel. The legacy FastAPI
+phone-mode pipeline remains in this repository for local tests and backup demos.
 
 ### One real call, step by step
 
 1. **You set up the call** in the web app: company, number, goal, limits, the info the
    agent may share, and the opening line it should say. The app sends this to
    `POST /calls`.
-2. **The backend starts a Cartesia agent** with your goal, limits, and opening line filled
-   into its instructions (`backend/cartesia/spec.py`).
+2. **Convex starts the existing Cartesia agent** with your goal, limits, and opening line
+   passed as dynamic variables. The agent's instructions and voice remain in Cartesia.
 3. **The agent dials the company** from a Cartesia phone number, presses through the
    menu, waits on hold, and talks to the rep. It starts by saying it's an AI calling for
    you. The managed agent chooses menu options and calls its built-in `send_dtmf` tool.
 4. **Every utterance comes back as captions.** Cartesia sends each line to our webhook;
-   the backend redacts it, saves it, and pushes it to your phone over a WebSocket (or
-   Convex).
+   Convex redacts it, saves it, and streams it to your phone with a subscription.
 5. **When the agent needs you, it calls a tool on our backend:**
    - `ask_user`: puts a question on your screen and waits for your typed answer;
      explicit keypad requests use DTMF instead of reading the answer aloud
    - `check_offer`: tests any fee, offer, or plan change against your limits
    - `report_state`: tells the app whether the call is in a menu, on hold, or with a person
    - `finish`: records the outcome and reference number
-6. **The call ends.** You get a summary, and the backend deletes the call data at
+6. **The call ends.** You get a summary, and Convex deletes the call data at
    Cartesia.
+
+The current production app is [nautical-wolverine-162.convex.site](https://nautical-wolverine-162.convex.site/).
+See [Convex always-on deployment](docs/convex-always-on.md) for setup and verification.
 
 ### Two ways to place a call
 
@@ -104,8 +105,8 @@ Chosen with `TELEPHONY`:
 
 | Mode | What dials | Who is the rep | Use it for |
 |---|---|---|---|
-| `cartesia` (default on Azure) | A Cartesia agent calls the real number from a Cartesia phone number. Our backend gets every utterance by webhook and answers the agent's tool calls. | A real company, or your own cell for testing | Real calls |
-| `phone` | Our own pipeline: Cartesia speech-to-text and voice, Jev, Claude, guard | Whoever opens `/phone` in a browser; it plays the fake company's menu and hold music first | Backup demo, no phone network |
+| `cartesia` (production) | A Cartesia agent calls the real number from a Cartesia phone number. Convex gets every utterance by webhook and answers the agent's tool calls. | A real company, or your own cell for testing | Real calls |
+| `phone` (local legacy) | Our own pipeline: Cartesia speech-to-text and voice, Jev, Claude, guard | Whoever opens `/phone` in a browser; it plays the fake company's menu and hold music first | Backup demo, no phone network |
 
 With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake line.
 
@@ -124,13 +125,10 @@ With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake
   stretch of audio (menu, hold music, silence, a person, voicemail), picks the menu option
   that matches the goal, and confirms a human is there before the agent speaks. A hard
   timeout falls back to a safe default, so the call never stalls.
-- **Azure: built to run for real.** Container Apps with one replica always warm,
-  PostgreSQL, Key Vault for every API key, Application Insights with redacted telemetry,
-  all deployed by one Bicep template and one script.
-- **Convex: captions that survive a dropped connection.** Optional storage for call
-  records, questions (never answers), and the audit log. Captions stream through Convex
-  subscriptions, with 24 hours of replay if the phone reconnects.
-- **Web app.** Next.js and Tailwind, built as a static export and served by the backend.
+- **Convex: the always-on backend.** HTTP actions serve the static app, start calls,
+  receive Cartesia callbacks and tool calls, and hold encrypted answers briefly. Call
+  records, audit events and redacted captions stream through Convex subscriptions.
+- **Web app.** Next.js and Tailwind, built as a static export and served by Convex.
   It can be added to the home screen.
 
 ## Safety rules

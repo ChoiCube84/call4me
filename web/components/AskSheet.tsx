@@ -20,13 +20,28 @@ export function AskSheet({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [sending, setSending] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [viewport, setViewport] = useState<{ top: number; height: number } | null>(null);
   const now = useNow(true);
   const high = ask.sensitivity === "high";
+  const compact = !high && viewport !== null && viewport.height < 600;
   const left = Math.max(0, Math.ceil(ask.timeoutS - (now - ask.at.getTime()) / 1000));
 
   useEffect(() => {
-    if (!high) inputRef.current?.focus();
-  }, [ask.requestId, high]);
+    if (high) return;
+    const visible = window.visualViewport;
+    // The keyboard can shrink and pan the visible area without resizing fixed elements.
+    const update = () => setViewport({ top: visible?.offsetTop ?? 0, height: visible?.height ?? window.innerHeight });
+    const frame = requestAnimationFrame(update);
+    visible?.addEventListener("resize", update);
+    visible?.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    return () => {
+      cancelAnimationFrame(frame);
+      visible?.removeEventListener("resize", update);
+      visible?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [high]);
 
   const send = async () => {
     const el = inputRef.current;
@@ -50,16 +65,27 @@ export function AskSheet({
     }
   };
 
+  const typeItMyself = (
+    <button
+      type="button"
+      onClick={onSayItMyself}
+      className={`min-h-12 self-start rounded-xl border-2 border-line px-4 font-semibold ${compact ? "mt-3 text-base" : "text-lg"}`}
+    >
+      I&apos;ll type it to the rep myself
+    </button>
+  );
+
   return (
     <div
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="ask-title"
       aria-describedby="ask-question"
-      className="fixed inset-0 z-50 flex flex-col overflow-y-auto bg-black"
+      className={`fixed inset-0 z-50 flex flex-col bg-black ${high ? "overflow-y-auto" : "overflow-hidden"}`}
+      style={!high && viewport ? { top: viewport.top, height: viewport.height, bottom: "auto" } : undefined}
     >
-      <div className="safe-top bg-accent text-black">
-        <div className="safe-x flex min-h-16 items-center justify-between gap-3 py-3" aria-live="assertive">
+      <div className="safe-top shrink-0 bg-accent text-black">
+        <div className={`safe-x flex items-center justify-between gap-3 ${compact ? "min-h-12 py-2" : "min-h-16 py-3"}`} aria-live="assertive">
           <span id="ask-title" className="text-2xl font-extrabold">
             {high ? "Private info needed" : "Question for you"}
           </span>
@@ -69,11 +95,24 @@ export function AskSheet({
         </div>
       </div>
 
-      <div className="safe-x safe-bottom flex flex-1 flex-col gap-5 py-6">
-        <p className="text-sm font-bold uppercase tracking-wide text-muted">The company asks:</p>
-        <p id="ask-question" className="text-3xl font-bold leading-tight">
-          {ask.question}
-        </p>
+      <div className={`safe-x safe-bottom flex flex-1 flex-col ${high ? "gap-5 py-6" : compact ? "min-h-0 gap-2 pt-2" : "min-h-0 gap-5 pt-6"}`}>
+        <div className={high ? "contents" : "min-h-0 flex-1 overflow-y-auto overscroll-contain"}>
+          <p className="text-sm font-bold uppercase tracking-wide text-muted">The company asks:</p>
+          <p id="ask-question" className={`font-bold leading-tight ${compact ? "mt-1 text-2xl" : "mt-3 text-3xl"}`}>
+            {ask.question}
+          </p>
+          {note && (
+            <p role="alert" className="mt-3 rounded-xl bg-panel-2 p-3 text-lg font-semibold text-warn">
+              {note}
+            </p>
+          )}
+          {left === 0 && (
+            <p className="mt-3 text-lg text-muted">
+              call4me asked the company to hold. You can still answer.
+            </p>
+          )}
+          {compact && typeItMyself}
+        </div>
 
         {high ? (
           <>
@@ -91,19 +130,19 @@ export function AskSheet({
           </>
         ) : (
           <form
-            className="flex flex-col gap-4"
+            className={`shrink-0 ${compact ? "grid grid-cols-[minmax(0,1fr)_7rem] gap-2" : "flex flex-col gap-4"}`}
             onSubmit={(e) => {
               e.preventDefault();
               void send();
             }}
           >
-            <label htmlFor="ask-answer" className="text-lg font-semibold">
+            <label htmlFor="ask-answer" className={`font-semibold ${compact ? "col-span-2 text-sm" : "text-lg"}`}>
               Your answer (call4me says it once, then forgets it)
             </label>
             <textarea
               id="ask-answer"
               ref={inputRef}
-              rows={2}
+              rows={compact ? 1 : 2}
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}
@@ -114,34 +153,17 @@ export function AskSheet({
                   void send();
                 }
               }}
-              className="w-full rounded-2xl border-4 border-accent bg-panel px-4 py-3 text-2xl"
+              className={`w-full resize-none rounded-2xl border-4 border-accent bg-panel px-4 text-2xl ${compact ? "py-2" : "py-3"}`}
             />
             <button
               type="submit"
               disabled={sending}
-              className="min-h-16 rounded-2xl bg-accent px-6 text-2xl font-extrabold text-black disabled:opacity-60"
+              className={`${compact ? "min-h-12 px-2 text-xl" : "min-h-16 px-6 text-2xl"} rounded-2xl bg-accent font-extrabold text-black disabled:opacity-60`}
             >
               {sending ? "Sending…" : "Send answer"}
             </button>
-            <button
-              type="button"
-              onClick={onSayItMyself}
-              className="min-h-12 self-start rounded-xl border-2 border-line px-4 text-lg font-semibold"
-            >
-              I&apos;ll type it to the rep myself
-            </button>
+            {!compact && typeItMyself}
           </form>
-        )}
-
-        {note && (
-          <p role="alert" className="rounded-xl bg-panel-2 p-3 text-lg font-semibold text-warn">
-            {note}
-          </p>
-        )}
-        {left === 0 && (
-          <p className="text-lg text-muted">
-            call4me asked the company to hold. You can still answer.
-          </p>
         )}
       </div>
     </div>

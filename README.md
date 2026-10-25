@@ -64,7 +64,7 @@ you need to see it **while it's happening**. That idea is the core of call4me.
 ```
 Phone browser: web app (/)  ──REST + WebSocket (token)──▶  Backend (FastAPI) on Azure Container Apps
 Judges view (/dashboard/)                                   ├─ serves the web app (static Next.js export)
-                                                            ├─ Call state engine ── Jev (TypeSafe) decisions
+                                                            ├─ Phone-mode state engine ── Jev (TypeSafe) decisions
                                                             ├─ Claude: conversation, greeting, summaries
                                                             ├─ Guard: disclosure, privacy, limits (in code)
                                                             ├─ Convex (or PostgreSQL) · Key Vault · Application Insights
@@ -85,7 +85,7 @@ through it, and nothing is stored or shown until it has been redacted.
    into its instructions (`backend/cartesia/spec.py`).
 3. **The agent dials the company** from a Cartesia phone number, presses through the
    menu, waits on hold, and talks to the rep. It starts by saying it's an AI calling for
-   you.
+   you. The managed agent chooses menu options and calls its built-in `send_dtmf` tool.
 4. **Every utterance comes back as captions.** Cartesia sends each line to our webhook;
    the backend redacts it, saves it, and pushes it to your phone over a WebSocket (or
    Convex).
@@ -119,7 +119,7 @@ With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake
   opening disclosure and the post-call summary.
 - **Guard layer: limits in code.** In our own pipeline, every sentence passes
   `backend/agent/guard.py` before it's spoken. It runs in under 10 ms.
-- **Jev (TypeSafe): knowing what's on the line.** In our pipeline, Jev classifies each
+- **Jev (TypeSafe): knowing what's on the line in phone mode.** Jev classifies each
   stretch of audio (menu, hold music, silence, a person, voicemail), picks the menu option
   that matches the goal, and confirms a human is there before the agent speaks. A hard
   timeout falls back to a safe default, so the call never stalls.
@@ -169,13 +169,16 @@ pipeline (phone mode) with real Claude and Jev and the real guard:
 
 ```bash
 uv sync
-uv run pytest -q                                       # unit + integration + full-call tests
-USE_MOCKS=true uv run python -m evals.live_call        # one full call on mocks, printed live
+TELEPHONY=mock uv run pytest -q                       # unit + integration + full-call tests
+TELEPHONY=mock USE_MOCKS=true uv run python -m evals.live_call # one full call on mocks
 docker compose up -d                                   # local Postgres
 (cd web && npm ci && npm run build)                    # the web app -> web/out, served at /
-USE_MOCKS=true uv run uvicorn backend.main:app --reload
+TELEPHONY=mock USE_MOCKS=true uv run uvicorn backend.main:app --reload
 open http://localhost:8000/                            # web app; /dashboard/ = judges view
 ```
+
+Set `TELEPHONY=mock` explicitly for mock runs: a `TELEPHONY=cartesia` value in `.env`
+otherwise takes precedence over `USE_MOCKS` when selecting the call path.
 
 For web app development with hot reload: `cd web && NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev`
 (see `web/README.md`).
@@ -224,7 +227,8 @@ Chrome > menu > **Install app**. Enter the access code once. During a call:
 - Captions are large, and the banner shows where the call is (menu, hold with a timer, a
   person, needs your answer).
 - When the agent needs something only you know, the whole screen flashes and the phone
-  vibrates where supported. Type the answer.
+  vibrates where supported. Tap the answer field to open the keyboard. The question,
+  input, and **Send answer** button fit above it; long questions can be scrolled.
 - Type a message at any time and the agent says it to the rep. In phone mode, **Take
   over** stops the agent and speaks your words directly; hand back with one tap. In
   Cartesia mode, your message is said word for word on the agent's next turn.

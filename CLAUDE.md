@@ -71,7 +71,9 @@ Backend (Python, FastAPI) on Azure Container Apps, exactly 1 replica
   │    listens, thinks (Claude via Cartesia), speaks, presses keys.
   │    We get every utterance by webhook (POST /cartesia/webhook) and answer
   │    its tools (POST /cartesia/tools/{name}): ask_user, check_offer,
-  │    report_state, finish.
+  │    menu_choice, report_state, finish.
+  │    Jev classifies each company utterance (call state) and picks the
+  │    menu key when the agent calls menu_choice.
   │
   └─ TELEPHONY=phone (backup demo, no phone network)
        Our own pipeline against the fake support line:
@@ -85,7 +87,9 @@ With `USE_MOCKS=true` every external service is mocked and calls go to an in-pro
 ### Who does what
 - **Cartesia:** in `cartesia` mode, the whole call (telephony, listening, speaking, DTMF) via a Managed Agent whose model is Claude (`CARTESIA_AGENT_MODEL`, default `claude-haiku-5.5`). In `phone` mode, ears (STT) and voice (Sonic TTS).
 - **Claude:** the conversation with the rep in both modes (through Cartesia's agent, or our own tool-use loop via the Anthropic API in phone mode, default `claude-sonnet-5-5`), the greeting, caption summaries, and the post-call summary.
-- **Jev (TypeSafe):** phone mode only. Fast typed decisions — call state every 2–3 s, menu option choice, human detection — with probabilities. Falls back to keyword heuristics without `TYPESAFE_API_KEY`. Not used in `cartesia` mode, where the agent reports state through `call4me_report_state`.
+- **Jev (TypeSafe):** fast typed decisions with probabilities, in both modes. Falls back to keyword heuristics without `TYPESAFE_API_KEY` (or if it doesn't answer within 2 s).
+  - `cartesia` mode: classifies every company utterance (menu, recorded message, hold, person, callback offer…) and moves the call state on a confident answer, until a person answers; picks the menu key when Haiku calls `call4me_menu_choice`. Haiku does the talking and still reports state; where its report contradicts Jev's last confident label, a `jev_disagreement` event is logged.
+  - `phone` mode: call state every 2–3 s, menu option choice, human detection and confirmation.
 - **Convex (optional):** stored call data and the live caption feed when `STORAGE_BACKEND=convex`. See section 9.
 - **Azure:** hosting, PostgreSQL, Key Vault, Application Insights. `AZURE_FOUNDRY_*` settings exist but Claude is not routed through Foundry.
 
@@ -99,7 +103,7 @@ With `USE_MOCKS=true` every external service is mocked and calls go to an in-pro
 | Storage | PostgreSQL + SQLAlchemy (default; Docker locally, Azure Flexible Server in prod) or Convex (`convex/`, optional) |
 | Telephony | Cartesia Managed Agents (real calls); `/phone` browser page + mock line (backup) |
 | Speech | Cartesia STT and Sonic TTS (phone mode); Cartesia agent voice (`CARTESIA_VOICE_ID`) |
-| Decisions | Jev via `typesafe-sdk` (model `jev-latest`), phone mode only |
+| Decisions | Jev via `typesafe-sdk` (model `jev-latest`) |
 | Conversation | Claude via the Anthropic SDK (tool use) |
 | Audio | numpy, soxr; energy VAD and a time-domain music/speech classifier (lightweight stand-ins for Silero and YAMNet) |
 | Web app | Next.js (App Router, TypeScript) + Tailwind, static export in `web/out` |
@@ -175,7 +179,10 @@ All transitions go through `engine/states.py` and are logged (from, to, reason, 
 **Human detection (latency-critical):** Jev flags `human` with high confidence → play the **pre-generated** greeting → confirm by a natural response from the rep (recordings don't respond) → visual alert on the user's screen. Target: agent speaks within ~1.5 s of the rep's greeting.
 
 ### Cartesia mode (`cartesia/call.py`)
-The agent navigates menus (listens to the whole menu, then `send_dtmf`), stays silent on hold (`skip_turn`), and calls `call4me_report_state` with `menu | hold | person` and a note. We map that to the states above. The menu note ("Pressed 2: returns and refunds…") is shown to the user, never spoken. `call_completed` / `call_failed` webhooks end the call.
+- **Jev watches:** each company utterance from the webhook (already redacted) goes to Jev's state check with the last few utterances, off the webhook's path. A confident answer (≥0.6; ≥0.75 for `human`) moves the state. Jev stops once a person answers. Voicemail and call-ended labels are only logged; Cartesia ends the call itself.
+- **Jev picks menu keys:** after the whole menu, Haiku calls `call4me_menu_choice` with the options as `key: label` lines (our caption parse is the backup). Jev chooses; callback keys are never offered. Haiku presses what Jev returns; below 0.5 it may pick a clearly better option.
+- **Haiku reports:** it stays silent on hold (`skip_turn`) and calls `call4me_report_state` with `menu | hold | person` and a note, which also moves the state. The menu note ("Pressed 2: returns and refunds…") is shown to the user, never spoken.
+- Every Jev decision is a `jev_decision` event + audit entry, same shape as phone mode. `call_completed` / `call_failed` webhooks end the call.
 
 ---
 
@@ -199,6 +206,7 @@ The agent's instructions carry the goal, limits, disclosure wording, info the us
 |---|---|
 | `call4me_ask_user(question, sensitivity)` | Ask the user; waits up to ~95 s for the typed answer |
 | `call4me_check_offer(kind, description, amount_usd)` | Decide in code whether the limits allow a charge, plan change, cancellation, or anything outside the goal |
+| `call4me_menu_choice(options)` | Jev picks the menu key (or word to say) for the goal |
 | `call4me_report_state(state, note)` | Update the user's screen: menu, hold, or person |
 | `call4me_finish(summary, …)` | Record the outcome for the summary screen (silent) |
 | built-in `send_dtmf`, `skip_turn`, `end_call` | Keys, staying silent on hold, hanging up |
@@ -301,7 +309,7 @@ The native iOS app is shelved (`ios/` stays in the repo, unmaintained): a free A
 TELEPHONY=cartesia            # cartesia | phone | (empty: mock with USE_MOCKS, else cartesia)
 PUBLIC_BASE_URL=              # public https URL for Cartesia webhooks (Azure URL or cloudflared)
 CARTESIA_API_KEY=  CARTESIA_VOICE_ID=  CARTESIA_AGENT_MODEL=claude-haiku-5.5
-TYPESAFE_API_KEY=             # Jev, phone mode
+TYPESAFE_API_KEY=             # Jev (both modes; keyword heuristics without it)
 ANTHROPIC_API_KEY=            # Claude, phone mode
 API_TOKEN=                    # empty = open (local dev); deploy.sh generates one
 STORAGE_BACKEND=sql           # or convex (+ CONVEX_URL, CONVEX_BACKEND_TOKEN)
@@ -368,7 +376,7 @@ The fake support line (`fakeline/`): menu (1 orders, 2 billing, 0 agent), nested
 
 ## 18. Status
 
-Done: fake support line, phone-mode pipeline (audio, STT, Jev engine, menu navigation, Claude agent, guard, TTS), `ask_user` loop, takeover, audit log + redaction, evals (11/11), mobile web app + judges view, Azure deploy, real calls through Cartesia, optional Convex storage.
+Done: fake support line, phone-mode pipeline (audio, STT, Jev engine, menu navigation, Claude agent, guard, TTS), `ask_user` loop, takeover, audit log + redaction, evals (11/11), mobile web app + judges view, Azure deploy, real calls through Cartesia with Jev state checks and menu choices, optional Convex storage.
 
 Shelved: native iOS app, Live Activities, APNs push (needs a paid Apple account). Stretch: web push.
 

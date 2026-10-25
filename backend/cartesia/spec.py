@@ -3,7 +3,8 @@
 Cartesia handles the phone line, listening, speaking, and turn-taking; Claude (via
 Cartesia's managed models) decides what to say. Our server stays in the loop
 through webhook tools (ask the user, check an offer against the user's limits,
-report progress, record the outcome) and the per-turn call webhook (captions).
+pick a menu option with Jev, report progress, record the outcome) and the per-turn
+call webhook (captions, plus a Jev state check on each company utterance).
 
 Per-call facts arrive as dynamic variables, filled when we start the call.
 """
@@ -31,10 +32,24 @@ captions and answers by typing. You speak for them.
 <limits>{{limits}}</limits>
 <known_info>{{known_info}}</known_info>
 
+Everything you write is spoken out loud on the call. Never think out loud: no \
+reasoning, no plans, no commentary such as "I need to check that against the limits" \
+or "The rep is quoting 53 dollars". Say only what you would say to the person on the \
+line. Use tools silently.
+
 Part 1: the automated phone system.
-- When a menu lists options, pick the one that best fits the goal and press it with \
-send_dtmf (or say it, if the menu asks you to speak). Prefer reaching a live person. \
-Call call4me_report_state with state "menu".
+- Be patient with phone menus. Listen to the whole menu before pressing anything. Many \
+menus say the key before the option ("press 1 for orders"), so a number alone tells \
+you nothing: never press as soon as you hear "press 1". Wait until the recording has \
+read every option and stopped; while it is still talking, use skip_turn and keep \
+listening. If you are not sure which option fits, wait for the menu to repeat.
+- Then call call4me_menu_choice with every option you heard. It returns the key to \
+press (or the word to say): press it with send_dtmf (or say it, if the menu asks you \
+to speak). Only if the result says it is not sure and another option clearly fits the \
+goal better, choose that one; prefer reaching a live person. Say nothing to a menu. In \
+the same turn, call call4me_report_state with state "menu" and a note the customer \
+will read (not spoken), giving the key and why, e.g. "Pressed 2: returns and refunds, \
+matches your refund request". This note is the only place you explain a choice.
 - While on hold (music, "please hold", recorded announcements), stay silent: use \
 skip_turn and call call4me_report_state with state "hold". Never talk to a recording.
 
@@ -57,12 +72,17 @@ the rep to hold a little longer and call it again.
 the rep the customer will provide it another way.
 5. Before agreeing to anything that costs money, changes a plan or subscription, \
 cancels something, or adds anything the goal did not ask for, call call4me_check_offer \
-and follow its answer. If it is not allowed, politely decline and return to the goal.
+and follow its answer. Before checking, say at most "One moment." Do not explain why. \
+If it is not allowed, politely decline and return to the goal.
 6. Tool results may include a message from the customer. Say it to the rep right \
 away, word for word.
-7. Before ending, read back the key details (amounts, dates, the reference number) \
-and ask if there is anything else. Then call call4me_finish with a plain summary for \
-the customer.
+7. Confirm the key details (amounts, dates, the reference number) once, then wrap up. \
+If the rep already stated them and you repeated them back, or the rep confirmed them, \
+that is the confirmation: do not ask the rep to read them back and do not repeat them \
+again. Otherwise read them back yourself once. Ask for a reference or confirmation \
+number once, only if none was given. Then ask once if there is anything else, thank \
+the rep, and say goodbye. Call call4me_finish silently with a plain summary: it goes \
+to the customer's screen. Never say that summary out loud.
 8. Never hang up on someone. End the call only when it is finished for both sides \
 (the rep said goodbye or confirmed there is nothing else) or the rep has gone silent \
 and did not answer after you asked "Are you still there?" twice.
@@ -166,6 +186,22 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
             ["kind", "description", "amount_usd"],
         ),
         tool(
+            "menu_choice",
+            "Once a phone menu has read every option, ask which one to choose. Returns "
+            "the key to press or the word to say. Silent: say nothing while calling it.",
+            {
+                "options": {
+                    "type": "string",
+                    "description": "Every option you heard, one per line as key: label, "
+                    "e.g. '1: orders' then '2: returns and refunds' then '0: "
+                    "representative'. If the menu asks you to speak, use the word to say "
+                    "as the key, e.g. 'billing: questions about a bill'.",
+                },
+            },
+            ["options"],
+            timeout=5,
+        ),
+        tool(
             "report_state",
             "Tell the customer's screen where the call is: in a phone menu, on hold, or "
             "talking to a person.",
@@ -173,7 +209,9 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
                 "state": {"type": "string", "enum": ["menu", "hold", "person"]},
                 "note": {
                     "type": "string",
-                    "description": "A few words, e.g. 'pressed 2 for refunds'.",
+                    "description": "Shown to the customer, never spoken. For a menu: the key "
+                    "you pressed and why, e.g. 'Pressed 2: returns and refunds, matches your "
+                    "refund request'.",
                 },
             },
             ["state", "note"],
@@ -181,8 +219,8 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
         ),
         tool(
             "finish",
-            "Record the outcome for the customer, after reading back the details and "
-            "before saying goodbye.",
+            "Record the outcome for the customer's screen, once the details are confirmed. "
+            "Silent: never read this summary out loud.",
             {
                 "summary": {
                     "type": "string",
@@ -218,8 +256,9 @@ def agent_config(*, voice_id: str, model_id: str, tool_ids: list[str]) -> dict[s
                 "description": "End the call only when it is finished for both sides (the "
                 "rep said goodbye or confirmed there is nothing else), or the rep did not "
                 "answer after you asked 'Are you still there?' twice. Never on a recording "
-                "or while on hold.",
-                "pre_tool_speech": "auto",
+                "or while on hold. You have already said goodbye; say nothing more.",
+                # The goodbye comes first (rule 7); no extra speech while hanging up.
+                "pre_tool_speech": "off",
             },
             "send_dtmf": {},
             # On hold: wait silently without "are you there?" check-ins.

@@ -13,7 +13,7 @@ Built at Cal Hacks 13.0 for Deaf and hard-of-hearing adults. Full design: `CLAUD
 ```
 Phone browser: web app (/)  ──REST + WebSocket (token)──▶  Backend (FastAPI) on Azure Container Apps
 Judges view (/dashboard/)                                   ├─ serves the web app (static Next.js export)
-                                                            ├─ Call state engine ── Jev (TypeSafe) decisions (phone mode)
+                                                            ├─ Jev (TypeSafe): call state + menu choices, both modes
                                                             ├─ Claude: conversation, greeting, summaries
                                                             ├─ Guard: disclosure, privacy, limits (in code)
                                                             ├─ PostgreSQL (default) or Convex · Key Vault · Application Insights
@@ -44,8 +44,12 @@ the limits, and the no-SSN rule are in its instructions, and offers go through o
 deletes the call data at Cartesia once the call is wrapped up. The guard still can't block
 a sentence before Cartesia's agent says it. Takeover differs too: Cartesia's agent can't be
 muted from outside, so what you type is queued and the agent says it word for word on its
-next tool call. Jev is used only in `phone` mode; in `cartesia` mode the agent reports where
-the call is (menu, hold, person) through our `report_state` tool.
+next tool call.
+
+Jev works alongside Haiku on real calls: every company utterance goes to Jev, whose state
+check (menu, recorded message, hold, person) drives the call state until a person answers,
+and when a menu has read its options Haiku asks our `menu_choice` tool, where Jev picks the
+key. Haiku does the talking. Every Jev decision lands on the timeline with its probability.
 
 ## Storage: PostgreSQL or Convex
 
@@ -139,7 +143,7 @@ pipeline (phone mode) with real Claude and Jev and the real guard:
 | `backend/auth.py` | Access token check on every route (when `API_TOKEN` is set) |
 | `backend/cartesia/` | Cartesia mode: agent setup, webhook + tools, one call (`call.py`) |
 | `backend/calls.py` | Phone/mock mode: telephony → audio → STT → engine → Claude → guard → TTS |
-| `backend/engine/` | Call states, Jev checks, menu navigation, human detection (phone mode) |
+| `backend/engine/` | Call states, Jev checks (both modes), menu navigation, human detection |
 | `backend/db/` | Models, `store.py` (SQL or Convex), Convex client |
 | `convex/`, `docs/convex-migration.md` | Convex schema, storage, live replay; setup guide |
 | `backend/agent/` | Claude tool-use loop, `ask_user`, guard layer |

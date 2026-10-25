@@ -27,7 +27,7 @@ It describes the project **as built**. The plan changed during the hackathon (Tw
 ## 2. Non-negotiable rules (product and safety)
 
 1. **AI disclosure:** the agent always identifies itself as an AI assistant calling on behalf of the user, using the user's chosen wording, at the start of any human interaction.
-2. **Private info is never stored.** Anything the user provides via `ask_user` (PINs, account numbers, DOB, etc.) is spoken once, then redacted from transcripts, logs, the database, and telemetry. Store only that a request happened, never the answer.
+2. **Private info is never stored.** Anything the user provides via `ask_user` (PINs, account numbers, DOB, etc.) is relayed by voice or requested keypad tones, then redacted from transcripts, logs, the database, and telemetry. Store only that a request happened, never the answer.
 3. **The agent never invents user facts.** It only speaks information the user provided or the session goal contains. Otherwise it must call `ask_user`.
 4. **High-sensitivity items** (full SSN, full card number, passwords): do not relay via the agent. The user provides them another way.
 5. **Limits are enforced outside the model.** The agent cannot agree to anything outside the user's stated goal and limits (new plans, fees, cancellations not requested). Blocked attempts are logged.
@@ -41,7 +41,7 @@ It describes the project **as built**. The plan changed during the hackathon (Tw
 | Rule | `phone` mode (our pipeline) | `cartesia` mode (real calls) |
 |---|---|---|
 | 1 Disclosure | Guard prepends it if missing | In the agent's instructions; the agent speaks it |
-| 2 Redaction | `audit/log.py` before every log, DB write, live message, telemetry | Same on our side; Cartesia sees answers (its agent must say them), and we delete the call data at Cartesia once the call wraps up |
+| 2 Redaction | `audit/log.py` before every log, DB write, live message, telemetry | Same on our side; Cartesia sees answers to relay them, and we delete the call data at Cartesia once the call wraps up |
 | 3 No invented facts | Prompt + `ask_user` tool | Prompt + `call4me_ask_user` tool |
 | 4 High sensitivity | Guard blocks relay; `request_takeover` | Instructions + `ask_user` with `sensitivity=high` returns no value; the web app shows **Say it myself** |
 | 5 Limits | Guard checks every outgoing line in code | Agent is told to call `call4me_check_offer`, which decides in code; nothing can block a sentence before Cartesia's agent says it |
@@ -71,9 +71,8 @@ Backend (Python, FastAPI) on Azure Container Apps, exactly 1 replica
   │    listens, thinks (Claude via Cartesia), speaks, presses keys.
   │    We get every utterance by webhook (POST /cartesia/webhook) and answer
   │    its tools (POST /cartesia/tools/{name}): ask_user, check_offer,
-  │    menu_choice, report_state, finish.
-  │    Jev classifies each company utterance (call state) and picks the
-  │    menu key when the agent calls menu_choice.
+  │    report_state, finish. The managed agent chooses menu options and
+  │    presses keys with its built-in send_dtmf tool.
   │
   └─ TELEPHONY=phone (backup demo, no phone network)
        Our own pipeline against the fake support line:
@@ -85,11 +84,9 @@ Backend (Python, FastAPI) on Azure Container Apps, exactly 1 replica
 With `USE_MOCKS=true` every external service is mocked and calls go to an in-process fake line (tests, evals, local dev).
 
 ### Who does what
-- **Cartesia:** in `cartesia` mode, the whole call (telephony, listening, speaking, DTMF) via a Managed Agent whose model is Claude (`CARTESIA_AGENT_MODEL`, default `claude-haiku-5.5`). In `phone` mode, ears (STT) and voice (Sonic TTS).
+- **Cartesia:** in `cartesia` mode, the whole call (telephony, listening, speaking, DTMF) via a Managed Agent whose model is Claude (`CARTESIA_AGENT_MODEL`, default `claude-haiku-4.5`). In `phone` mode, ears (STT) and voice (Sonic TTS).
 - **Claude:** the conversation with the rep in both modes (through Cartesia's agent, or our own tool-use loop via the Anthropic API in phone mode, default `claude-sonnet-5-5`), the greeting, caption summaries, and the post-call summary.
-- **Jev (TypeSafe):** fast typed decisions with probabilities, in both modes. Falls back to keyword heuristics without `TYPESAFE_API_KEY` (or if it doesn't answer within 2 s).
-  - `cartesia` mode: classifies every company utterance (menu, recorded message, hold, person, callback offer…) and moves the call state on a confident answer, until a person answers; picks the menu key when Haiku calls `call4me_menu_choice`. Haiku does the talking and still reports state; where its report contradicts Jev's last confident label, a `jev_disagreement` event is logged.
-  - `phone` mode: call state every 2–3 s, menu option choice, human detection and confirmation.
+- **Jev (TypeSafe):** fast typed decisions with probabilities in `phone` mode: call state every 2–3 s, menu option choice, human detection and confirmation. Falls back to keyword heuristics without `TYPESAFE_API_KEY` (or if it doesn't answer within 2 s). Cartesia mode uses the managed agent's menu selection and state reports; it has no Jev watcher or `call4me_menu_choice` tool.
 - **Convex (optional):** stored call data and the live caption feed when `STORAGE_BACKEND=convex`. See section 9.
 - **Azure:** hosting, PostgreSQL, Key Vault, Application Insights. `AZURE_FOUNDRY_*` settings exist but Claude is not routed through Foundry.
 
@@ -103,7 +100,7 @@ With `USE_MOCKS=true` every external service is mocked and calls go to an in-pro
 | Storage | PostgreSQL + SQLAlchemy (default; Docker locally, Azure Flexible Server in prod) or Convex (`convex/`, optional) |
 | Telephony | Cartesia Managed Agents (real calls); `/phone` browser page + mock line (backup) |
 | Speech | Cartesia STT and Sonic TTS (phone mode); Cartesia agent voice (`CARTESIA_VOICE_ID`) |
-| Decisions | Jev via `typesafe-sdk` (model `jev-latest`) |
+| Decisions | Jev via `typesafe-sdk` (model `jev-latest`) in phone mode; managed agent in Cartesia mode |
 | Conversation | Claude via the Anthropic SDK (tool use) |
 | Audio | numpy, soxr; energy VAD and a time-domain music/speech classifier (lightweight stand-ins for Silero and YAMNet) |
 | Web app | Next.js (App Router, TypeScript) + Tailwind, static export in `web/out` |
@@ -179,10 +176,11 @@ All transitions go through `engine/states.py` and are logged (from, to, reason, 
 **Human detection (latency-critical):** Jev flags `human` with high confidence → play the **pre-generated** greeting → confirm by a natural response from the rep (recordings don't respond) → visual alert on the user's screen. Target: agent speaks within ~1.5 s of the rep's greeting.
 
 ### Cartesia mode (`cartesia/call.py`)
-- **Jev watches:** each company utterance from the webhook (already redacted) goes to Jev's state check with the last few utterances, off the webhook's path. A confident answer (≥0.6; ≥0.75 for `human`) moves the state. Jev stops once a person answers. Voicemail and call-ended labels are only logged; Cartesia ends the call itself.
-- **Jev picks menu keys:** after the whole menu, Haiku calls `call4me_menu_choice` with the options as `key: label` lines (our caption parse is the backup). Jev chooses; callback keys are never offered. Haiku presses what Jev returns; below 0.5 it may pick a clearly better option.
-- **Haiku reports:** it stays silent on hold (`skip_turn`) and calls `call4me_report_state` with `menu | hold | person` and a note, which also moves the state. The menu note ("Pressed 2: returns and refunds…") is shown to the user, never spoken.
-- Every Jev decision is a `jev_decision` event + audit entry, same shape as phone mode. `call_completed` / `call_failed` webhooks end the call.
+- **The managed agent picks menu keys:** it chooses the option that fits the goal and invokes built-in `send_dtmf` (or says the requested word). There is no backend menu-choice step.
+- Keypad requests use `send_dtmf` for known info or an `ask_user` answer with `delivery="dtmf"`. The agent is instructed not to narrate decisions to automated systems; `send_dtmf` and `skip_turn` have pre-tool speech off.
+- **The agent reports state:** it stays silent on hold (`skip_turn`) and calls `call4me_report_state` with `menu | hold | person`. The note is used as the transition reason; state changes go through the shared recorder.
+- Per-turn webhooks produce redacted live captions and record observed `send_dtmf` calls as `menu_action` events. This mode does not produce Jev decisions, confidence scores, or disagreement events.
+- `call_completed` / `call_failed` webhooks end the call. Session, request, timeline, and audit writes still use the selected SQL or Convex store.
 
 ---
 
@@ -200,23 +198,24 @@ Runs in `IN_CONVERSATION`. Each rep turn: final STT transcript → Claude → to
 | `request_takeover(reason)` | Ask the user to take over (e.g., high-sensitivity info) |
 
 ### Cartesia mode: webhook tools (`cartesia/spec.py`)
-The agent's instructions carry the goal, limits, disclosure wording, info the user chose to share, and the rules above. Its tools call back into our server:
+The agent's instructions carry the goal, limits, disclosure wording, info the user chose to share, and the rules above. Its four webhook tools call back into our server:
 
 | Tool | Purpose |
 |---|---|
-| `call4me_ask_user(question, sensitivity)` | Ask the user; waits up to ~95 s for the typed answer |
+| `call4me_ask_user(question, sensitivity, delivery?)` | Ask the user; waits up to ~95 s. Delivery defaults to speech; explicit keypad requests use `dtmf` |
 | `call4me_check_offer(kind, description, amount_usd)` | Decide in code whether the limits allow a charge, plan change, cancellation, or anything outside the goal |
-| `call4me_menu_choice(options)` | Jev picks the menu key (or word to say) for the goal |
 | `call4me_report_state(state, note)` | Update the user's screen: menu, hold, or person |
-| `call4me_finish(summary, …)` | Record the outcome for the summary screen (silent) |
+| `call4me_finish(summary, …)` | Record the outcome for the summary screen |
 | built-in `send_dtmf`, `skip_turn`, `end_call` | Keys, staying silent on hold, hanging up |
 
 Any tool result may carry a queued message the user typed; the agent says it word for word.
 
 ### `ask_user` flow (both modes)
+For Cartesia keypad requests, skip the spoken holding line and relay the answer through `send_dtmf`. Menu/hold states remain unchanged while the user types; timeouts retry silently. The existing spoken-answer flow is:
+
 1. Agent says a holding line: "One moment, let me check with my client."
 2. State → `WAITING_ON_USER`; create `user_request` (question only).
-3. The web app gets the question over the live feed: full-screen color flash + vibration where supported, big question, text input.
+3. The web app gets the question over the live feed: full-screen color flash + vibration where supported, big question, text input. The keyboard opens when the user taps the input; the sheet fits the visible area so the question, input, and **Send answer** remain accessible.
 4. User answers → `POST /requests/{id}/answer` → spoken once → **redacted** everywhere.
 5. No answer in time → ask the rep to hold briefly or offer to call back.
 6. `sensitivity=high` → no answer box, only **Say it myself**.
@@ -290,8 +289,8 @@ The native iOS app is shelved (`ios/` stays in the repo, unmaintained): a free A
 
 - **Stack:** Next.js (App Router, TypeScript) + Tailwind, built as a static export (`web/out`) that FastAPI serves at `/`. No Node server in production. Pages use query params (`/live/?id=…`), not dynamic segments.
 - **Start (`/`):** company (from `GET /companies`), phone number, goal, limits, info the agent may share (values used once, never saved in the browser), AI introduction → `POST /calls`.
-- **Live (`/live/?id=`):** large high-contrast captions and a state banner (with a hold timer) over `WS /calls/{id}/live` (or Convex). It reconnects automatically and rebuilds from the replay. Also shows plain-language summaries (including why a menu key was pressed) and Hang up.
-- **Question sheet (`ask_user`):** full-screen color flash (a single color change with reduced motion) plus vibration where supported, a big question, and a text input → `POST /requests/{id}/answer`. The input clears at once. For `sensitivity=high` there is no answer box, only **"Say it myself"** → takeover. It closes on the `ask_user_answered` live event.
+- **Live (`/live/?id=`):** large high-contrast captions and a state banner (with a hold timer) over `WS /calls/{id}/live` (or Convex). It reconnects automatically and rebuilds from the replay. Also shows plain-language summaries when emitted and Hang up.
+- **Question sheet (`ask_user`):** full-screen color flash (a single color change with reduced motion) plus vibration where supported, a big question, and a text input → `POST /requests/{id}/answer`. It opens without focusing the input. Tapping the input opens the keyboard; the sheet follows the visible viewport, with a scrollable question and input/Send controls that stay above the keyboard. The input clears at once on send. For `sensitivity=high` there is no answer box, only **"Say it myself"** → takeover. It closes on the `ask_user_answered` live event.
 - **Take over (type-to-talk):** `POST /calls/{id}/takeover`, then `POST /calls/{id}/type`. Quick phrases. Hand back with one tap. (Cartesia mode: see the table in section 2.)
 - **Summary (`/summary/?id=`):** outcome, reference number (large, copyable), minutes saved.
 - **Judges view (`/dashboard/`):** recent calls, a live call with its timeline and audit log (denials highlighted, private values shown as `[REDACTED]`).
@@ -308,8 +307,8 @@ The native iOS app is shelved (`ios/` stays in the repo, unmaintained): a free A
 ```
 TELEPHONY=cartesia            # cartesia | phone | (empty: mock with USE_MOCKS, else cartesia)
 PUBLIC_BASE_URL=              # public https URL for Cartesia webhooks (Azure URL or cloudflared)
-CARTESIA_API_KEY=  CARTESIA_VOICE_ID=  CARTESIA_AGENT_MODEL=claude-haiku-5.5
-TYPESAFE_API_KEY=             # Jev (both modes; keyword heuristics without it)
+CARTESIA_API_KEY=  CARTESIA_VOICE_ID=  CARTESIA_AGENT_MODEL=claude-haiku-4.5
+TYPESAFE_API_KEY=             # Jev, phone mode (keyword heuristics without it)
 ANTHROPIC_API_KEY=            # Claude, phone mode
 API_TOKEN=                    # empty = open (local dev); deploy.sh generates one
 STORAGE_BACKEND=sql           # or convex (+ CONVEX_URL, CONVEX_BACKEND_TOKEN)
@@ -324,8 +323,8 @@ Never commit secrets. In prod they are loaded from Azure Key Vault.
 
 ## 13. Development workflow
 
-1. `uv sync` · `uv run pytest -q` · `(cd web && npm ci && npm run build)`
-2. All mocks: `USE_MOCKS=true uv run uvicorn backend.main:app --reload`, open `http://localhost:8000/`.
+1. `uv sync` · `TELEPHONY=mock uv run pytest -q` · `(cd web && npm ci && npm run build)`
+2. All mocks: `TELEPHONY=mock USE_MOCKS=true uv run uvicorn backend.main:app --reload`, open `http://localhost:8000/`. Explicit mock telephony overrides any real-call mode in `.env`.
 3. Phone mode: `docker compose up -d`, `TELEPHONY=phone uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000`, open `/phone` (rep) and `/` (user). `uv run python -m evals.phone_rep` plays a scripted rep.
 4. Cartesia mode: `cloudflared tunnel --url http://localhost:8000`, set `PUBLIC_BASE_URL`, start the server. On start it creates or updates the Cartesia agent, tools, webhook and phone number (`uv run python -m backend.cartesia.setup` does it by hand). Test by calling your own cell before any real company.
 
@@ -335,7 +334,7 @@ The fake support line (`fakeline/`): menu (1 orders, 2 billing, 0 agent), nested
 
 ## 14. Testing and evals
 
-- **Unit tests:** `uv run pytest -q` (state transitions, guard rules, redaction, limits, full mock calls); `npm test` (Convex functions).
+- **Unit tests:** `TELEPHONY=mock uv run pytest -q` (state transitions, guard rules, redaction, limits, full mock calls); `npm test` (Convex functions).
 - **Eval suite (`evals/`):** 11 scripted scenarios on the fake line with a scripted bot rep — cancellation, fee waiver, order status, callback offer, transfer back to hold, menu loop, rep asks for PIN, rep offers paid upgrade, rep refuses to talk to AI, user takeover, rep asks for an SSN.
 - `USE_MOCKS=false uv run python -m evals.run --driver product --guard real` runs our phone-mode pipeline with real Claude and Jev: `evals/results/product-claude.json` passed **11/11** with 0 safety violations. This measures phone mode, not the Cartesia agent.
 - **Metrics:** success rate, avg minutes saved, # times asked user, errors, guard denials, time-to-greet. Saved in `evals/results/`; also served as JSON at `GET /metrics`.
@@ -376,7 +375,7 @@ The fake support line (`fakeline/`): menu (1 orders, 2 billing, 0 agent), nested
 
 ## 18. Status
 
-Done: fake support line, phone-mode pipeline (audio, STT, Jev engine, menu navigation, Claude agent, guard, TTS), `ask_user` loop, takeover, audit log + redaction, evals (11/11), mobile web app + judges view, Azure deploy, real calls through Cartesia with Jev state checks and menu choices, optional Convex storage.
+Done: fake support line, phone-mode pipeline (audio, STT, Jev engine, menu navigation, Claude agent, guard, TTS), `ask_user` loop, takeover, audit log + redaction, evals (11/11), mobile web app + judges view, Azure deploy, real calls through Cartesia's managed agent and four webhook tools, optional Convex storage.
 
 Shelved: native iOS app, Live Activities, APNs push (needs a paid Apple account). Stretch: web push.
 
@@ -387,9 +386,9 @@ Before demoing a Cartesia call, test one by calling your own cell. Keep a record
 ## 19. Demo (3 minutes)
 
 1. Problem: Deaf users vs phone-only support (quote from someone we interviewed).
-2. On a phone, start a call ("Remove the $40 late fee; no plan changes") → the Live screen shows menu navigation (and why each key was pressed), then hold with a timer.
+2. On a phone, start a call ("Remove the $40 late fee; no plan changes") → the Live screen shows menu progress, then hold with a timer.
 3. A rep answers → the agent discloses it's an AI and starts.
-4. Rep asks for the account PIN → the screen flashes → the user types → the agent relays it; it shows as `[REDACTED]` everywhere.
+4. Rep asks for the account PIN → the screen flashes → the user taps the input and types → the agent relays it; it shows as `[REDACTED]` everywhere.
 5. Rep offers a paid upgrade → `check_offer` / guard says no → the agent declines.
 6. Fee waived, reference number → summary "34 minutes saved."
 7. Proof: eval results (11/11), Azure deployment, audit log with the PIN redacted.

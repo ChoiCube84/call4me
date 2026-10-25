@@ -31,7 +31,7 @@ you need to see it **while it's happening**. That idea is the core of call4me.
 
 - **It asks only for what only you know.** When the rep needs your PIN or a choice
   between two appointment times, your whole screen flashes and the phone vibrates. You
-  type the answer, the agent says it once, and it's redacted from every log, caption, and
+  type the answer, the agent relays it by voice or the requested keypad tones, and it's redacted from every log, caption, and
   database.
 - **It stays inside your limits.** If the rep offers something you didn't ask for, like a
   faster plan for $10 more a month, the agent checks it against your limits and politely
@@ -64,7 +64,7 @@ you need to see it **while it's happening**. That idea is the core of call4me.
 ```
 Phone browser: web app (/)  ──REST + WebSocket (token)──▶  Backend (FastAPI) on Azure Container Apps
 Judges view (/dashboard/)                                   ├─ serves the web app (static Next.js export)
-                                                            ├─ Call state engine ── Jev (TypeSafe) decisions
+                                                            ├─ Phone-mode state engine ── Jev (TypeSafe) decisions
                                                             ├─ Claude: conversation, greeting, summaries
                                                             ├─ Guard: disclosure, privacy, limits (in code)
                                                             ├─ Convex (or PostgreSQL) · Key Vault · Application Insights
@@ -85,12 +85,13 @@ through it, and nothing is stored or shown until it has been redacted.
    into its instructions (`backend/cartesia/spec.py`).
 3. **The agent dials the company** from a Cartesia phone number, presses through the
    menu, waits on hold, and talks to the rep. It starts by saying it's an AI calling for
-   you.
+   you. The managed agent chooses menu options and calls its built-in `send_dtmf` tool.
 4. **Every utterance comes back as captions.** Cartesia sends each line to our webhook;
    the backend redacts it, saves it, and pushes it to your phone over a WebSocket (or
    Convex).
 5. **When the agent needs you, it calls a tool on our backend:**
-   - `ask_user`: puts a question on your screen and waits for your typed answer
+   - `ask_user`: puts a question on your screen and waits for your typed answer;
+     explicit keypad requests use DTMF instead of reading the answer aloud
    - `check_offer`: tests any fee, offer, or plan change against your limits
    - `report_state`: tells the app whether the call is in a menu, on hold, or with a person
    - `finish`: records the outcome and reference number
@@ -113,13 +114,13 @@ With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake
 - **Cartesia: the voice and the phone line.** A Cartesia Managed Agent places real calls
   and presses menu keys. Our backup pipeline uses Cartesia streaming speech-to-text
   (`ink-whisper`) and Sonic 2 for the agent's voice.
-- **Claude: the conversation.** Claude Haiku 5.5 runs inside the Cartesia agent, chosen
+- **Claude: the conversation.** Claude Haiku 4.5 runs inside the Cartesia agent, chosen
   for speed on a live call. In our own pipeline, Claude Sonnet 5.5 runs a tool-use loop
   (`say`, `ask_user`, `press_digits`, `end_call`, `request_takeover`) and writes the
   opening disclosure and the post-call summary.
 - **Guard layer: limits in code.** In our own pipeline, every sentence passes
   `backend/agent/guard.py` before it's spoken. It runs in under 10 ms.
-- **Jev (TypeSafe): knowing what's on the line.** In our pipeline, Jev classifies each
+- **Jev (TypeSafe): knowing what's on the line in phone mode.** Jev classifies each
   stretch of audio (menu, hold music, silence, a person, voicemail), picks the menu option
   that matches the goal, and confirms a human is there before the agent speaks. A hard
   timeout falls back to a safe default, so the call never stalls.
@@ -137,7 +138,7 @@ With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake
 These are the rules from CLAUDE.md section 2:
 
 1. The agent always says it's an AI calling on your behalf.
-2. Anything you answer is spoken once, then redacted everywhere.
+2. Your answer is relayed by voice or requested keypad tones, then redacted everywhere.
 3. It never makes up facts about you.
 4. It never relays a full SSN, card number, or password.
 5. It can't agree to anything outside your goal and limits.
@@ -169,13 +170,16 @@ pipeline (phone mode) with real Claude and Jev and the real guard:
 
 ```bash
 uv sync
-uv run pytest -q                                       # unit + integration + full-call tests
-USE_MOCKS=true uv run python -m evals.live_call        # one full call on mocks, printed live
+TELEPHONY=mock uv run pytest -q                       # unit + integration + full-call tests
+TELEPHONY=mock USE_MOCKS=true uv run python -m evals.live_call # one full call on mocks
 docker compose up -d                                   # local Postgres
 (cd web && npm ci && npm run build)                    # the web app -> web/out, served at /
-USE_MOCKS=true uv run uvicorn backend.main:app --reload
+TELEPHONY=mock USE_MOCKS=true uv run uvicorn backend.main:app --reload
 open http://localhost:8000/                            # web app; /dashboard/ = judges view
 ```
+
+Set `TELEPHONY=mock` explicitly for mock runs: a `TELEPHONY=cartesia` value in `.env`
+otherwise takes precedence over `USE_MOCKS` when selecting the call path.
 
 For web app development with hot reload: `cd web && NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev`
 (see `web/README.md`).
@@ -224,7 +228,8 @@ Chrome > menu > **Install app**. Enter the access code once. During a call:
 - Captions are large, and the banner shows where the call is (menu, hold with a timer, a
   person, needs your answer).
 - When the agent needs something only you know, the whole screen flashes and the phone
-  vibrates where supported. Type the answer.
+  vibrates where supported. Tap the answer field to open the keyboard. The question,
+  input, and **Send answer** button fit above it; long questions can be scrolled.
 - Type a message at any time and the agent says it to the rep. In phone mode, **Take
   over** stops the agent and speaks your words directly; hand back with one tap. In
   Cartesia mode, your message is said word for word on the agent's next turn.
@@ -283,7 +288,6 @@ in `ios/` is shelved.
 - Hard limits on real calls: check the agent's speech before it reaches the line, so the
   guard works the same in every mode.
 - Instant takeover: bridge the user's typed words straight into the call with no wait.
-- Keypad entry for PINs, so private numbers go out as tones and are never spoken aloud.
 - Saved menu routes, so the second call to the same company skips to the right department.
 - Push notifications, so the user can put their phone down during a long hold.
 - Sign language input, so users can answer in ASL instead of typing.

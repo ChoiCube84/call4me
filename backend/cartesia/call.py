@@ -13,7 +13,7 @@ the API endpoints and dashboard don't care which one runs a call.
 
 Privacy: answers and pre-call info are registered for redaction before anything
 is logged or shown; our DB and live channel only ever see redacted text. Cartesia
-does see them (its agent has to say them), and keeps call data until we delete it:
+does see them (its agent has to relay them), and keeps call data until we delete it:
 we delete it as soon as the call is wrapped up.
 """
 

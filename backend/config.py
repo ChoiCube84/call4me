@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     cartesia_api_key: str = ""
     cartesia_voice_id: str = ""
     # The model that runs the phone agent on Cartesia (GET /v1/agents/models).
-    cartesia_agent_model: str = "claude-haiku-5.5"
+    cartesia_agent_model: str = "claude-haiku-4.5"
     # Shared secret for Cartesia's webhook and tool calls; derived from the API key if unset.
     cartesia_webhook_secret: str = ""
     typesafe_api_key: str = ""

@@ -137,7 +137,7 @@ export function AskSheet({
             }}
           >
             <label htmlFor="ask-answer" className={`font-semibold ${compact ? "col-span-2 text-sm" : "text-lg"}`}>
-              Your answer (call4me says it once, then forgets it)
+              Your answer (shared once, then forgotten)
             </label>
             <textarea
               id="ask-answer"

@@ -27,7 +27,7 @@ It describes the project **as built**. The plan changed during the hackathon (Tw
 ## 2. Non-negotiable rules (product and safety)
 
 1. **AI disclosure:** the agent always identifies itself as an AI assistant calling on behalf of the user, using the user's chosen wording, at the start of any human interaction.
-2. **Private info is never stored.** Anything the user provides via `ask_user` (PINs, account numbers, DOB, etc.) is spoken once, then redacted from transcripts, logs, the database, and telemetry. Store only that a request happened, never the answer.
+2. **Private info is never stored.** Anything the user provides via `ask_user` (PINs, account numbers, DOB, etc.) is relayed by voice or requested keypad tones, then redacted from transcripts, logs, the database, and telemetry. Store only that a request happened, never the answer.
 3. **The agent never invents user facts.** It only speaks information the user provided or the session goal contains. Otherwise it must call `ask_user`.
 4. **High-sensitivity items** (full SSN, full card number, passwords): do not relay via the agent. The user provides them another way.
 5. **Limits are enforced outside the model.** The agent cannot agree to anything outside the user's stated goal and limits (new plans, fees, cancellations not requested). Blocked attempts are logged.
@@ -41,7 +41,7 @@ It describes the project **as built**. The plan changed during the hackathon (Tw
 | Rule | `phone` mode (our pipeline) | `cartesia` mode (real calls) |
 |---|---|---|
 | 1 Disclosure | Guard prepends it if missing | In the agent's instructions; the agent speaks it |
-| 2 Redaction | `audit/log.py` before every log, DB write, live message, telemetry | Same on our side; Cartesia sees answers (its agent must say them), and we delete the call data at Cartesia once the call wraps up |
+| 2 Redaction | `audit/log.py` before every log, DB write, live message, telemetry | Same on our side; Cartesia sees answers to relay them, and we delete the call data at Cartesia once the call wraps up |
 | 3 No invented facts | Prompt + `ask_user` tool | Prompt + `call4me_ask_user` tool |
 | 4 High sensitivity | Guard blocks relay; `request_takeover` | Instructions + `ask_user` with `sensitivity=high` returns no value; the web app shows **Say it myself** |
 | 5 Limits | Guard checks every outgoing line in code | Agent is told to call `call4me_check_offer`, which decides in code; nothing can block a sentence before Cartesia's agent says it |
@@ -84,7 +84,7 @@ Backend (Python, FastAPI) on Azure Container Apps, exactly 1 replica
 With `USE_MOCKS=true` every external service is mocked and calls go to an in-process fake line (tests, evals, local dev).
 
 ### Who does what
-- **Cartesia:** in `cartesia` mode, the whole call (telephony, listening, speaking, DTMF) via a Managed Agent whose model is Claude (`CARTESIA_AGENT_MODEL`, default `claude-haiku-5.5`). In `phone` mode, ears (STT) and voice (Sonic TTS).
+- **Cartesia:** in `cartesia` mode, the whole call (telephony, listening, speaking, DTMF) via a Managed Agent whose model is Claude (`CARTESIA_AGENT_MODEL`, default `claude-haiku-4.5`). In `phone` mode, ears (STT) and voice (Sonic TTS).
 - **Claude:** the conversation with the rep in both modes (through Cartesia's agent, or our own tool-use loop via the Anthropic API in phone mode, default `claude-sonnet-5-5`), the greeting, caption summaries, and the post-call summary.
 - **Jev (TypeSafe):** fast typed decisions with probabilities in `phone` mode: call state every 2–3 s, menu option choice, human detection and confirmation. Falls back to keyword heuristics without `TYPESAFE_API_KEY` (or if it doesn't answer within 2 s). Cartesia mode uses the managed agent's menu selection and state reports; it has no Jev watcher or `call4me_menu_choice` tool.
 - **Convex (optional):** stored call data and the live caption feed when `STORAGE_BACKEND=convex`. See section 9.
@@ -307,7 +307,7 @@ The native iOS app is shelved (`ios/` stays in the repo, unmaintained): a free A
 ```
 TELEPHONY=cartesia            # cartesia | phone | (empty: mock with USE_MOCKS, else cartesia)
 PUBLIC_BASE_URL=              # public https URL for Cartesia webhooks (Azure URL or cloudflared)
-CARTESIA_API_KEY=  CARTESIA_VOICE_ID=  CARTESIA_AGENT_MODEL=claude-haiku-5.5
+CARTESIA_API_KEY=  CARTESIA_VOICE_ID=  CARTESIA_AGENT_MODEL=claude-haiku-4.5
 TYPESAFE_API_KEY=             # Jev, phone mode (keyword heuristics without it)
 ANTHROPIC_API_KEY=            # Claude, phone mode
 API_TOKEN=                    # empty = open (local dev); deploy.sh generates one

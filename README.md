@@ -114,7 +114,7 @@ With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake
 - **Cartesia: the voice and the phone line.** A Cartesia Managed Agent places real calls
   and presses menu keys. Our backup pipeline uses Cartesia streaming speech-to-text
   (`ink-whisper`) and Sonic 2 for the agent's voice.
-- **Claude: the conversation.** Claude Haiku 5.5 runs inside the Cartesia agent, chosen
+- **Claude: the conversation.** Claude Haiku 4.5 runs inside the Cartesia agent, chosen
   for speed on a live call. In our own pipeline, Claude Sonnet 5.5 runs a tool-use loop
   (`say`, `ask_user`, `press_digits`, `end_call`, `request_takeover`) and writes the
   opening disclosure and the post-call summary.

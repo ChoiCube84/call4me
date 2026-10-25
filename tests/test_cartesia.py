@@ -25,7 +25,7 @@ from backend.notify.live import answers, hub
 SETTINGS = SimpleNamespace(
     cartesia_api_key="sk_car_test",
     cartesia_voice_id="voice-1",
-    cartesia_agent_model="claude-haiku-5.5",
+    cartesia_agent_model="claude-haiku-4.5",
     cartesia_webhook_secret="",
     public_base_url="https://call4me.example",
 )
@@ -144,7 +144,7 @@ async def test_setup_creates_everything_once_then_updates(fake: FakeCartesia) ->
     assert body["session_id"] == {"type": "string", "dynamic_variable": "session_id"}
     assert fake.webhooks[0]["url"] == "https://call4me.example/cartesia/webhook"
     config = fake.agents[0]["config"]
-    assert config["model"]["id"] == "claude-haiku-5.5"
+    assert config["model"]["id"] == "claude-haiku-4.5"
     assert config["initial_message"] is None  # the company speaks first
     assert config["system_tools"]["send_dtmf"] == {"pre_tool_speech": "off"}
     assert config["system_tools"]["skip_turn"] == {

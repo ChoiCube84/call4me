@@ -40,8 +40,8 @@ audio, menu tones and PIN tones after deployment.
 The app sends a PIN or other private answer to its same-origin HTTPS endpoint. An
 HTTP action encrypts it with AES-GCM before writing to Convex. The waiting Cartesia
 tool decrypts it, deletes the ciphertext from Convex, and returns the answer once.
-An abandoned ciphertext expires after 90 seconds; a 30-second cleanup interval
-keeps its maximum retention near two minutes. Finishing a call also deletes its
+An abandoned ciphertext expires after 60 seconds; a 30-second cleanup interval
+removes it well within two minutes. Finishing a call also deletes its
 remaining answers and typed messages. Raw values are never written to call records,
 captions, audit logs or live replay. Cartesia necessarily receives the answer to
 speak it or send its keypad tones; call data at Cartesia is deleted on completion,

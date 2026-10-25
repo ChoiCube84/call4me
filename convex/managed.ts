@@ -209,7 +209,7 @@ export const putAnswer = internalMutation({
     const prior = await ctx.db.query("answer_mailbox")
       .withIndex("by_request", q => q.eq("request_id", args.request_id)).unique();
     if (prior) return false;
-    await ctx.db.insert("answer_mailbox", { ...args, expires_at: Date.now() + 90_000 });
+    await ctx.db.insert("answer_mailbox", { ...args, expires_at: Date.now() + 60_000 });
     await auditEvent(ctx, "user", "user_request.answered", request.session_id, "user answered");
     return true;
   },

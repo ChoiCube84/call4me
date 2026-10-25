@@ -35,6 +35,12 @@ Part 1: the automated phone system.
 - When a menu lists options, pick the one that best fits the goal and press it with \
 send_dtmf (or say it, if the menu asks you to speak). Prefer reaching a live person. \
 Call call4me_report_state with state "menu".
+- Never narrate your reasoning, menu choices, plans, or waiting to an automated \
+system. Use tools silently. Speak only if it requests a spoken response.
+- When asked to enter digits using the keypad, use send_dtmf, never read the digits \
+aloud. Use known_info if available; otherwise silently call call4me_ask_user with \
+delivery "dtmf". Preserve leading zeroes. Add # or * only when explicitly requested, \
+and only once.
 - While on hold (music, "please hold", recorded announcements), stay silent: use \
 skip_turn and call call4me_report_state with state "hold". Never talk to a recording.
 
@@ -47,12 +53,14 @@ sentence why you are calling.
 Rules. Follow them strictly; the customer relies on you.
 1. Only state facts that are in the goal or known_info, or that the customer gave you. \
 Never guess account numbers, names, addresses, dates, or anything else.
-2. Give known_info items only when the rep asks for them. Read numbers slowly, digit \
-by digit, in groups.
+2. Give known_info items only when asked for them. For a keypad request use \
+send_dtmf. For a spoken request, read numbers slowly, digit by digit, in groups.
 3. If the rep needs anything else from the customer (a code, a choice, a detail), say \
 "One moment, let me check with my client." and call call4me_ask_user. Then tell the \
 rep exactly what the customer answered. If the tool says there is no answer yet, ask \
-the rep to hold a little longer and call it again.
+the rep to hold a little longer and call it again. For keypad requests instead, \
+stay silent and call call4me_ask_user with delivery "dtmf", then use send_dtmf with \
+the answer. Never say the keypad answer or a waiting announcement aloud.
 4. Never ask for or say a full card number, Social Security number, or password. Tell \
 the rep the customer will provide it another way.
 5. Before agreeing to anything that costs money, changes a plan or subscription, \
@@ -130,7 +138,8 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
             "ask_user",
             "Ask the customer for something only they know (a code, a detail, a decision). "
             "They type the answer; you get it back as text. Can take up to a minute and a "
-            "half. Say 'One moment, let me check with my client.' before calling.",
+            "half. For spoken requests, say 'One moment, let me check with my client.' "
+            "before calling. For keypad requests, stay silent and set delivery to dtmf.",
             {
                 "question": {
                     "type": "string",
@@ -141,6 +150,12 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
                     "enum": ["low", "medium", "high"],
                     "description": "low: order number, ZIP, email. medium: PIN, account "
                     "number, date of birth. high: full card number, SSN, password.",
+                },
+                "delivery": {
+                    "type": "string",
+                    "enum": ["speech", "dtmf"],
+                    "description": "dtmf when asked to enter or press digits on the keypad; "
+                    "speech when asked to say or read an answer. Defaults to speech.",
                 },
             },
             ["question", "sensitivity"],
@@ -221,9 +236,9 @@ def agent_config(*, voice_id: str, model_id: str, tool_ids: list[str]) -> dict[s
                 "or while on hold.",
                 "pre_tool_speech": "auto",
             },
-            "send_dtmf": {},
+            "send_dtmf": {"pre_tool_speech": "off"},
             # On hold: wait silently without "are you there?" check-ins.
-            "skip_turn": {"wait_timeout_secs": -1},
+            "skip_turn": {"wait_timeout_secs": -1, "pre_tool_speech": "off"},
             # A phone menu can sound like voicemail; don't let detection hang up on it.
             "voicemail_detection": None,
         },

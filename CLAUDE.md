@@ -177,6 +177,7 @@ All transitions go through `engine/states.py` and are logged (from, to, reason, 
 
 ### Cartesia mode (`cartesia/call.py`)
 - **The managed agent picks menu keys:** it chooses the option that fits the goal and invokes built-in `send_dtmf` (or says the requested word). There is no backend menu-choice step.
+- Keypad requests use `send_dtmf` for known info or an `ask_user` answer with `delivery="dtmf"`. The agent is instructed not to narrate decisions to automated systems; `send_dtmf` and `skip_turn` have pre-tool speech off.
 - **The agent reports state:** it stays silent on hold (`skip_turn`) and calls `call4me_report_state` with `menu | hold | person`. The note is used as the transition reason; state changes go through the shared recorder.
 - Per-turn webhooks produce redacted live captions and record observed `send_dtmf` calls as `menu_action` events. This mode does not produce Jev decisions, confidence scores, or disagreement events.
 - `call_completed` / `call_failed` webhooks end the call. Session, request, timeline, and audit writes still use the selected SQL or Convex store.
@@ -201,7 +202,7 @@ The agent's instructions carry the goal, limits, disclosure wording, info the us
 
 | Tool | Purpose |
 |---|---|
-| `call4me_ask_user(question, sensitivity)` | Ask the user; waits up to ~95 s for the typed answer |
+| `call4me_ask_user(question, sensitivity, delivery?)` | Ask the user; waits up to ~95 s. Delivery defaults to speech; explicit keypad requests use `dtmf` |
 | `call4me_check_offer(kind, description, amount_usd)` | Decide in code whether the limits allow a charge, plan change, cancellation, or anything outside the goal |
 | `call4me_report_state(state, note)` | Update the user's screen: menu, hold, or person |
 | `call4me_finish(summary, …)` | Record the outcome for the summary screen |
@@ -210,6 +211,8 @@ The agent's instructions carry the goal, limits, disclosure wording, info the us
 Any tool result may carry a queued message the user typed; the agent says it word for word.
 
 ### `ask_user` flow (both modes)
+For Cartesia keypad requests, skip the spoken holding line and relay the answer through `send_dtmf`. Menu/hold states remain unchanged while the user types; timeouts retry silently. The existing spoken-answer flow is:
+
 1. Agent says a holding line: "One moment, let me check with my client."
 2. State → `WAITING_ON_USER`; create `user_request` (question only).
 3. The web app gets the question over the live feed: full-screen color flash + vibration where supported, big question, text input. The keyboard opens when the user taps the input; the sheet fits the visible area so the question, input, and **Send answer** remain accessible.

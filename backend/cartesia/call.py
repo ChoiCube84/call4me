@@ -216,6 +216,15 @@ class CartesiaCall:
 
     async def _ask_user(self, args: dict[str, Any]) -> str:
         question = str(args.get("question") or "").strip() or "The rep needs information."
+        keypad = args.get("delivery") == "dtmf"
+        resume_state = self.session.state if keypad else S.IN_CONVERSATION
+
+        async def resume(reason: str) -> None:
+            # A keypad prompt is not evidence that a person answered. Leave menu/hold
+            # states alone, and don't overwrite a newer state reported while waiting.
+            if not keypad or self.session.state is S.WAITING_ON_USER:
+                await self._go(resume_state, reason)
+
         try:
             sensitivity = Sensitivity(str(args.get("sensitivity") or "medium"))
         except ValueError:
@@ -229,13 +238,16 @@ class CartesiaCall:
                 category="TAKEOVER",
                 data={"session_id": self.id, "haptic": True},
             )
+            if keypad:
+                return "Not allowed: never relay a full card number, SSN, or password. Stay silent."
             return (
                 "Not allowed: never relay a full card number, SSN, or password. Tell the rep "
                 "the customer will provide it another way, and continue."
             )
         request = UserRequest(session_id=self.id, question=question, sensitivity=sensitivity)
         future = self.answers.expect(request.id)
-        await self._go(S.WAITING_ON_USER, "ask_user: waiting for the user")
+        if not keypad or self.session.state not in PRE_PERSON:
+            await self._go(S.WAITING_ON_USER, "ask_user: waiting for the user")
         try:
             await self.requests.create(request)
             await self._audit("user_request.created", "asked the user", subject=request.id)
@@ -260,22 +272,48 @@ class CartesiaCall:
             self.answers.release(request.id)
         if answer is None:
             await self.requests.set_status(request.id, UserRequestStatus.TIMED_OUT)
-            await self._go(S.IN_CONVERSATION, "ask_user timed out")
+            await resume("ask_user timed out")
+            if keypad:
+                return (
+                    "No answer yet. Stay silent; do not send tones or guess. Call "
+                    "call4me_ask_user again with delivery dtmf if the keypad answer "
+                    "is still needed."
+                )
             return (
                 "No answer yet. Ask the rep to hold a little longer, then call "
                 "call4me_ask_user again."
             )
         answer = answer.strip()
         audit.register_secret(self.id, answer)  # the endpoint did too; harmless twice
-        if looks_high_sensitivity(answer, question):
+        digits = "".join(c for c in answer if not c.isspace() and c != "-") if keypad else ""
+        if looks_high_sensitivity(answer, question) or (
+            keypad and looks_high_sensitivity(digits, question)
+        ):
             await self._deny("relay", "answer looks like a full card number or SSN")
-            await self._go(S.IN_CONVERSATION, "ask_user answer not relayed")
+            await resume("ask_user answer not relayed")
+            if keypad:
+                return "The answer is too sensitive to relay. Stay silent; do not send any tones."
             return (
                 "The customer's answer is too sensitive to say. Tell the rep they will "
                 "provide it another way."
             )
+        if keypad:
+            if not digits or any(c not in "0123456789*#" for c in digits):
+                await resume("ask_user keypad answer invalid")
+                return (
+                    "Invalid keypad answer. Stay silent and do not send tones. Call "
+                    "call4me_ask_user again with delivery dtmf to request only keypad digits."
+                )
+            audit.register_secret(self.id, digits)
         await self._audit("user_request.relayed", "answer handed to the agent", subject=request.id)
-        await self._go(S.IN_CONVERSATION, "ask_user answered")
+        await resume("ask_user answered")
+        if keypad:
+            return (
+                f"The customer provided keypad digits: {digits}\n"
+                "Call send_dtmf now with these exact digits. Preserve leading zeroes. "
+                "Append # or * only if explicitly requested and not already included. "
+                "Do not speak the digits or any commentary."
+            )
         return f"The customer answered: {answer}\nTell the rep now. Read numbers digit by digit."
 
     async def _check_offer(self, args: dict[str, Any]) -> str:

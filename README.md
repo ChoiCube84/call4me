@@ -90,7 +90,8 @@ through it, and nothing is stored or shown until it has been redacted.
    the backend redacts it, saves it, and pushes it to your phone over a WebSocket (or
    Convex).
 5. **When the agent needs you, it calls a tool on our backend:**
-   - `ask_user`: puts a question on your screen and waits for your typed answer
+   - `ask_user`: puts a question on your screen and waits for your typed answer;
+     explicit keypad requests use DTMF instead of reading the answer aloud
    - `check_offer`: tests any fee, offer, or plan change against your limits
    - `report_state`: tells the app whether the call is in a menu, on hold, or with a person
    - `finish`: records the outcome and reference number

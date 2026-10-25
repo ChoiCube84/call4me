@@ -6,6 +6,7 @@ A fake Cartesia API (httpx.MockTransport) stands in for api.cartesia.ai.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -18,7 +19,7 @@ from backend.cartesia import setup as cartesia_setup
 from backend.cartesia import spec
 from backend.cartesia.api import CartesiaAgentsApi
 from backend.cartesia.call import CartesiaCall, by_call_id
-from backend.contracts import CallLimits, CallSession, CallState
+from backend.contracts import CallLimits, CallSession, CallState, UserRequestStatus
 from backend.notify.live import answers, hub
 
 SETTINGS = SimpleNamespace(
@@ -145,7 +146,13 @@ async def test_setup_creates_everything_once_then_updates(fake: FakeCartesia) ->
     config = fake.agents[0]["config"]
     assert config["model"]["id"] == "claude-haiku-5.5"
     assert config["initial_message"] is None  # the company speaks first
-    assert config["system_tools"]["send_dtmf"] == {}
+    assert config["system_tools"]["send_dtmf"] == {"pre_tool_speech": "off"}
+    assert config["system_tools"]["skip_turn"] == {
+        "wait_timeout_secs": -1,
+        "pre_tool_speech": "off",
+    }
+    assert body["delivery"]["enum"] == ["speech", "dtmf"]
+    assert "delivery" not in tool["api_schema"]["request_body_schema"]["required"]
 
     n_requests = len(fake.requests)
     await cartesia_setup.ensure(SETTINGS, fake.api())  # idempotent: no new resources
@@ -249,6 +256,213 @@ async def test_ask_user_refuses_high_sensitivity(fake: FakeCartesia) -> None:
     reply = await call.tool("ask_user", {"question": "Full card number?", "sensitivity": "high"})
     assert reply.startswith("Not allowed")
     await call.finish({"status": "completed"})
+
+
+async def answer_tool_request(
+    call: CartesiaCall,
+    args: dict[str, Any],
+    answer: str,
+    *,
+    waiting_state: CallState,
+) -> str:
+    """Answer through the real broker after checking the UI's waiting state."""
+    q = hub.subscribe(call.id)
+    task = asyncio.create_task(call.tool("ask_user", args))
+    try:
+        while True:
+            message = await asyncio.wait_for(q.get(), 1)
+            if message.type == "ask_user":
+                break
+        assert call.session.state is waiting_state
+        assert answers.deliver(message.data["request_id"], answer)
+        return await asyncio.wait_for(task, 1)
+    finally:
+        hub.unsubscribe(call.id, q)
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_ask_user_dtmf_normalizes_keypad_input_and_redacts_it(fake: FakeCartesia) -> None:
+    call = await started_call(fake)
+    await call.tool("report_state", {"state": "menu"})
+    q = hub.subscribe(call.id)
+    typed = " 0 4-5\t6 * # "
+    normalized = "0456*#"
+    try:
+        reply = await answer_tool_request(
+            call,
+            {"question": "Enter the account code, then star and pound.", "delivery": "dtmf"},
+            typed,
+            waiting_state=CallState.MENU,
+        )
+        assert "send_dtmf" in reply and normalized in reply
+        assert "The customer answered:" not in reply
+        assert "Read numbers digit by digit" not in reply
+        assert call.session.state is CallState.MENU
+        assert not any(
+            r.to_state in (CallState.HUMAN_CONFIRMED, CallState.IN_CONVERSATION)
+            for r in call.recorder.transitions
+        )
+
+        # Cartesia may echo either the typed spelling or its normalized tool argument.
+        await call.on_event(
+            {
+                "type": "call_turn",
+                "turn": {
+                    "role": "assistant",
+                    "text": f"Code {typed.strip()}; normalized {normalized}.",
+                    "tool_calls": [{"name": "send_dtmf", "arguments": {"dtmf_tones": normalized}}],
+                },
+            }
+        )
+        messages = [q.get_nowait() for _ in range(q.qsize())]
+        caption = next(m for m in messages if m.type == "caption")
+        assert "[REDACTED]" in caption.data["text"]
+        assert typed.strip() not in caption.data["text"]
+        recorded = json.dumps(
+            {
+                "messages": [m.model_dump(mode="json") for m in messages],
+                "events": [e.model_dump(mode="json") for e in call.recorder.events],
+                "transcript": call.transcript,
+            }
+        )
+        assert typed.strip() not in recorded and normalized not in recorded
+        assert "0456" not in recorded
+    finally:
+        hub.unsubscribe(call.id, q)
+        await call.finish({"status": "completed"})
+
+
+@pytest.mark.parametrize(
+    "prior_state",
+    [
+        CallState.DIALING,
+        CallState.MENU,
+        CallState.HOLD,
+        CallState.RECORDED_MESSAGE,
+        CallState.CALLBACK_OFFERED,
+    ],
+)
+async def test_ask_user_dtmf_preserves_pre_person_state(
+    fake: FakeCartesia, prior_state: CallState
+) -> None:
+    call = await started_call(fake)
+    call.session.state = prior_state
+    try:
+        reply = await answer_tool_request(
+            call,
+            {"question": "Account code?", "delivery": "dtmf"},
+            "0456",
+            waiting_state=prior_state,
+        )
+        assert "send_dtmf" in reply and "0456" in reply
+        assert call.session.state is prior_state
+        assert not any(r.allowed for r in call.recorder.transitions)
+    finally:
+        await call.finish({"status": "completed"})
+
+
+@pytest.mark.parametrize("delivery", [None, "speech", "dtmf"])
+async def test_ask_user_during_human_conversation_waits_and_resumes(
+    fake: FakeCartesia, delivery: str | None
+) -> None:
+    call = await started_call(fake)
+    await call.tool("report_state", {"state": "person"})
+    args = {"question": "ZIP code on the account?", "sensitivity": "low"}
+    if delivery is not None:
+        args["delivery"] = delivery
+    try:
+        reply = await answer_tool_request(
+            call, args, "98109", waiting_state=CallState.WAITING_ON_USER
+        )
+        assert call.session.state is CallState.IN_CONVERSATION
+        if delivery == "dtmf":
+            assert "send_dtmf" in reply and "98109" in reply
+            assert "The customer answered:" not in reply
+        else:
+            assert "The customer answered: 98109" in reply
+            assert "Read numbers digit by digit" in reply
+            assert "send_dtmf" not in reply
+    finally:
+        await call.finish({"status": "completed"})
+
+
+@pytest.mark.parametrize("typed", ["PIN is 0456", "04/56", "0٤56", " -\t "])
+async def test_ask_user_dtmf_rejects_non_keypad_answers_without_echo(
+    fake: FakeCartesia, typed: str
+) -> None:
+    call = await started_call(fake)
+    await call.tool("report_state", {"state": "menu"})
+    try:
+        reply = await answer_tool_request(
+            call,
+            {"question": "Account code?", "delivery": "dtmf"},
+            typed,
+            waiting_state=CallState.MENU,
+        )
+        if typed.strip(" \t-"):
+            assert typed.strip() not in reply
+        assert "0456" not in reply and "0456" not in " ".join(call.transcript)
+        assert "send_dtmf" not in reply
+        assert "The customer answered:" not in reply
+        assert "Read numbers digit by digit" not in reply
+        assert "keypad" in reply.lower() or "invalid" in reply.lower()
+        assert call.session.state is CallState.MENU
+    finally:
+        await call.finish({"status": "completed"})
+
+
+@pytest.mark.parametrize("separator", [" ", "\t", "\n", "-"])
+async def test_ask_user_dtmf_cannot_bypass_high_sensitivity_guard(
+    fake: FakeCartesia, separator: str
+) -> None:
+    call = await started_call(fake)
+    await call.tool("report_state", {"state": "menu"})
+    try:
+        reply = await call.tool(
+            "ask_user",
+            {"question": "Full card number?", "sensitivity": "high", "delivery": "dtmf"},
+        )
+        assert reply.startswith("Not allowed")
+        assert not call.requests.requests
+        assert call.session.state is CallState.MENU
+
+        card = separator.join(["4242"] * 4)
+        reply = await answer_tool_request(
+            call,
+            {"question": "Account code?", "sensitivity": "medium", "delivery": "dtmf"},
+            card,
+            waiting_state=CallState.MENU,
+        )
+        assert card not in reply and "4242424242424242" not in reply
+        assert "The customer answered:" not in reply and "send_dtmf" not in reply
+        assert any(e.kind == "guard_denied" for e in call.recorder.events)
+        assert call.session.state is CallState.MENU
+    finally:
+        await call.finish({"status": "completed"})
+
+
+@pytest.mark.parametrize("prior_state", [CallState.MENU, CallState.IN_CONVERSATION])
+async def test_ask_user_dtmf_timeout_preserves_state_and_retries_silently(
+    fake: FakeCartesia, monkeypatch: pytest.MonkeyPatch, prior_state: CallState
+) -> None:
+    monkeypatch.setattr("backend.cartesia.call.ASK_USER_WAIT_S", 0.001)
+    call = await started_call(fake)
+    await call.tool(
+        "report_state", {"state": "menu" if prior_state is CallState.MENU else "person"}
+    )
+    try:
+        reply = await call.tool("ask_user", {"question": "Account code?", "delivery": "dtmf"})
+        assert call.session.state is prior_state
+        assert "call4me_ask_user" in reply
+        assert "silent" in reply.lower() or "do not speak" in reply.lower()
+        assert "Ask the rep to hold" not in reply
+        (request,) = call.requests.requests.values()
+        assert request.status is UserRequestStatus.TIMED_OUT
+    finally:
+        await call.finish({"status": "completed"})
 
 
 @pytest.mark.parametrize(

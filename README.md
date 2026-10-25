@@ -31,7 +31,7 @@ you need to see it **while it's happening**. That idea is the core of call4me.
 
 - **It asks only for what only you know.** When the rep needs your PIN or a choice
   between two appointment times, your whole screen flashes and the phone vibrates. You
-  type the answer, the agent says it once, and it's redacted from every log, caption, and
+  type the answer, the agent relays it by voice or the requested keypad tones, and it's redacted from every log, caption, and
   database.
 - **It stays inside your limits.** If the rep offers something you didn't ask for, like a
   faster plan for $10 more a month, the agent checks it against your limits and politely
@@ -138,7 +138,7 @@ With `USE_MOCKS=true` every service is mocked and calls go to an in-process fake
 These are the rules from CLAUDE.md section 2:
 
 1. The agent always says it's an AI calling on your behalf.
-2. Anything you answer is spoken once, then redacted everywhere.
+2. Your answer is relayed by voice or requested keypad tones, then redacted everywhere.
 3. It never makes up facts about you.
 4. It never relays a full SSN, card number, or password.
 5. It can't agree to anything outside your goal and limits.
@@ -288,7 +288,6 @@ in `ios/` is shelved.
 - Hard limits on real calls: check the agent's speech before it reaches the line, so the
   guard works the same in every mode.
 - Instant takeover: bridge the user's typed words straight into the call with no wait.
-- Keypad entry for PINs, so private numbers go out as tones and are never spoken aloud.
 - Saved menu routes, so the second call to the same company skips to the right department.
 - Push notifications, so the user can put their phone down during a long hold.
 - Sign language input, so users can answer in ASL instead of typing.

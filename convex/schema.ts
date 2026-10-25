@@ -56,4 +56,25 @@ export default defineSchema({
   live_message: defineTable({ ...liveMessage.fields, sequence: v.number() })
     .index("by_session_sequence", ["session_id", "sequence"])
     .index("by_external_id", ["id"]),
+  site_asset: defineTable({
+    path: v.string(), storage_id: v.id("_storage"), content_type: v.string(),
+  }).index("by_path", ["path"]),
+  managed_call: defineTable({
+    session_id: v.string(), provider_call_id: nullableString,
+    recorded_outcome: nullableString, recorded_reference: nullableString,
+    provider_deleted_at: nullableString,
+  }).index("by_session", ["session_id"])
+    .index("by_provider", ["provider_call_id"])
+    .index("by_deleted", ["provider_deleted_at"]),
+  // Answers are AES-GCM ciphertext and are removed as soon as the waiting tool
+  // receives them. A cleanup job removes abandoned ciphertext after two minutes.
+  answer_mailbox: defineTable({
+    request_id: v.string(), ciphertext: v.string(), nonce: v.string(),
+    expires_at: v.number(),
+  }).index("by_request", ["request_id"])
+    .index("by_expiry", ["expires_at"]),
+  typed_message: defineTable({
+    session_id: v.string(), ciphertext: v.string(), nonce: v.string(), expires_at: v.number(),
+  }).index("by_session", ["session_id"])
+    .index("by_expiry", ["expires_at"]),
 });

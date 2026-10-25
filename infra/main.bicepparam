@@ -13,7 +13,7 @@ param deployerPrincipalId = readEnvironmentVariable('DEPLOYER_PRINCIPAL_ID', '')
 // Non-secret settings.
 param telephony = readEnvironmentVariable('TELEPHONY', 'cartesia')
 param cartesiaVoiceId = readEnvironmentVariable('CARTESIA_VOICE_ID', '')
-param cartesiaAgentModel = readEnvironmentVariable('CARTESIA_AGENT_MODEL', 'claude-haiku-5.5')
+param cartesiaAgentModel = readEnvironmentVariable('CARTESIA_AGENT_MODEL', 'claude-haiku-4.5')
 param azureFoundryEndpoint = readEnvironmentVariable('AZURE_FOUNDRY_ENDPOINT', '')
 param apnsKeyId = readEnvironmentVariable('APNS_KEY_ID', '')
 param apnsTeamId = readEnvironmentVariable('APNS_TEAM_ID', '')

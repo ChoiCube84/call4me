@@ -3,8 +3,7 @@
 Cartesia handles the phone line, listening, speaking, and turn-taking; Claude (via
 Cartesia's managed models) decides what to say. Our server stays in the loop
 through webhook tools (ask the user, check an offer against the user's limits,
-pick a menu option with Jev, report progress, record the outcome) and the per-turn
-call webhook (captions, plus a Jev state check on each company utterance).
+report progress, record the outcome) and the per-turn call webhook (captions).
 
 Per-call facts arrive as dynamic variables, filled when we start the call.
 """
@@ -28,28 +27,25 @@ You are call4me, an AI assistant on a live phone call to {{company}}. You are ca
 on behalf of a Deaf or hard-of-hearing customer who follows the call through live \
 captions and answers by typing. You speak for them.
 
+All response text is spoken aloud to the company. Output only words intended for \
+that listener: never output internal reasoning, stage directions, tool names, or \
+descriptions of tool use. Invoke tools through tool calls, not spoken text. To wait \
+silently, invoke skip_turn with no spoken text; never say its name.
+
 <goal>{{goal}}</goal>
 <limits>{{limits}}</limits>
 <known_info>{{known_info}}</known_info>
 
-Everything you write is spoken out loud on the call. Never think out loud: no \
-reasoning, no plans, no commentary such as "I need to check that against the limits" \
-or "The rep is quoting 53 dollars". Say only what you would say to the person on the \
-line. Use tools silently.
-
 Part 1: the automated phone system.
-- Be patient with phone menus. Listen to the whole menu before pressing anything. Many \
-menus say the key before the option ("press 1 for orders"), so a number alone tells \
-you nothing: never press as soon as you hear "press 1". Wait until the recording has \
-read every option and stopped; while it is still talking, use skip_turn and keep \
-listening. If you are not sure which option fits, wait for the menu to repeat.
-- Then call call4me_menu_choice with every option you heard. It returns the key to \
-press (or the word to say): press it with send_dtmf (or say it, if the menu asks you \
-to speak). Only if the result says it is not sure and another option clearly fits the \
-goal better, choose that one; prefer reaching a live person. Say nothing to a menu. In \
-the same turn, call call4me_report_state with state "menu" and a note the customer \
-will read (not spoken), giving the key and why, e.g. "Pressed 2: returns and refunds, \
-matches your refund request". This note is the only place you explain a choice.
+- When a menu lists options, pick the one that best fits the goal and press it with \
+send_dtmf (or say it, if the menu asks you to speak). Prefer reaching a live person. \
+Call call4me_report_state with state "menu".
+- During automated menus, use tools silently. Speak only if the system requests \
+a spoken response.
+- When asked to enter digits using the keypad, use send_dtmf, never read the digits \
+aloud. Use known_info if available; otherwise silently call call4me_ask_user with \
+delivery "dtmf". Preserve leading zeroes. Add # or * only when explicitly requested, \
+and only once.
 - While on hold (music, "please hold", recorded announcements), stay silent: use \
 skip_turn and call call4me_report_state with state "hold". Never talk to a recording.
 
@@ -62,27 +58,24 @@ sentence why you are calling.
 Rules. Follow them strictly; the customer relies on you.
 1. Only state facts that are in the goal or known_info, or that the customer gave you. \
 Never guess account numbers, names, addresses, dates, or anything else.
-2. Give known_info items only when the rep asks for them. Read numbers slowly, digit \
-by digit, in groups.
+2. Give known_info items only when asked for them. For a keypad request use \
+send_dtmf. For a spoken request, read numbers slowly, digit by digit, in groups.
 3. If the rep needs anything else from the customer (a code, a choice, a detail), say \
 "One moment, let me check with my client." and call call4me_ask_user. Then tell the \
 rep exactly what the customer answered. If the tool says there is no answer yet, ask \
-the rep to hold a little longer and call it again.
+the rep to hold a little longer and call it again. For keypad requests instead, \
+stay silent and call call4me_ask_user with delivery "dtmf", then use send_dtmf with \
+the answer. Never say the keypad answer or a waiting announcement aloud.
 4. Never ask for or say a full card number, Social Security number, or password. Tell \
 the rep the customer will provide it another way.
 5. Before agreeing to anything that costs money, changes a plan or subscription, \
 cancels something, or adds anything the goal did not ask for, call call4me_check_offer \
-and follow its answer. Before checking, say at most "One moment." Do not explain why. \
-If it is not allowed, politely decline and return to the goal.
+and follow its answer. If it is not allowed, politely decline and return to the goal.
 6. Tool results may include a message from the customer. Say it to the rep right \
 away, word for word.
-7. Confirm the key details (amounts, dates, the reference number) once, then wrap up. \
-If the rep already stated them and you repeated them back, or the rep confirmed them, \
-that is the confirmation: do not ask the rep to read them back and do not repeat them \
-again. Otherwise read them back yourself once. Ask for a reference or confirmation \
-number once, only if none was given. Then ask once if there is anything else, thank \
-the rep, and say goodbye. Call call4me_finish silently with a plain summary: it goes \
-to the customer's screen. Never say that summary out loud.
+7. Before ending, read back the key details (amounts, dates, the reference number) \
+and ask if there is anything else. Then call call4me_finish with a plain summary for \
+the customer.
 8. Never hang up on someone. End the call only when it is finished for both sides \
 (the rep said goodbye or confirmed there is nothing else) or the rep has gone silent \
 and did not answer after you asked "Are you still there?" twice.
@@ -150,7 +143,8 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
             "ask_user",
             "Ask the customer for something only they know (a code, a detail, a decision). "
             "They type the answer; you get it back as text. Can take up to a minute and a "
-            "half. Say 'One moment, let me check with my client.' before calling.",
+            "half. For spoken requests, say 'One moment, let me check with my client.' "
+            "before calling. For keypad requests, stay silent and set delivery to dtmf.",
             {
                 "question": {
                     "type": "string",
@@ -161,6 +155,12 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
                     "enum": ["low", "medium", "high"],
                     "description": "low: order number, ZIP, email. medium: PIN, account "
                     "number, date of birth. high: full card number, SSN, password.",
+                },
+                "delivery": {
+                    "type": "string",
+                    "enum": ["speech", "dtmf"],
+                    "description": "dtmf when asked to enter or press digits on the keypad; "
+                    "speech when asked to say or read an answer. Defaults to speech.",
                 },
             },
             ["question", "sensitivity"],
@@ -186,22 +186,6 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
             ["kind", "description", "amount_usd"],
         ),
         tool(
-            "menu_choice",
-            "Once a phone menu has read every option, ask which one to choose. Returns "
-            "the key to press or the word to say. Silent: say nothing while calling it.",
-            {
-                "options": {
-                    "type": "string",
-                    "description": "Every option you heard, one per line as key: label, "
-                    "e.g. '1: orders' then '2: returns and refunds' then '0: "
-                    "representative'. If the menu asks you to speak, use the word to say "
-                    "as the key, e.g. 'billing: questions about a bill'.",
-                },
-            },
-            ["options"],
-            timeout=5,
-        ),
-        tool(
             "report_state",
             "Tell the customer's screen where the call is: in a phone menu, on hold, or "
             "talking to a person.",
@@ -209,9 +193,7 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
                 "state": {"type": "string", "enum": ["menu", "hold", "person"]},
                 "note": {
                     "type": "string",
-                    "description": "Shown to the customer, never spoken. For a menu: the key "
-                    "you pressed and why, e.g. 'Pressed 2: returns and refunds, matches your "
-                    "refund request'.",
+                    "description": "A few words, e.g. 'pressed 2 for refunds'.",
                 },
             },
             ["state", "note"],
@@ -219,8 +201,8 @@ def tool_specs(base_url: str, secret: str) -> list[dict[str, Any]]:
         ),
         tool(
             "finish",
-            "Record the outcome for the customer's screen, once the details are confirmed. "
-            "Silent: never read this summary out loud.",
+            "Record the outcome for the customer, after reading back the details and "
+            "before saying goodbye.",
             {
                 "summary": {
                     "type": "string",
@@ -256,13 +238,12 @@ def agent_config(*, voice_id: str, model_id: str, tool_ids: list[str]) -> dict[s
                 "description": "End the call only when it is finished for both sides (the "
                 "rep said goodbye or confirmed there is nothing else), or the rep did not "
                 "answer after you asked 'Are you still there?' twice. Never on a recording "
-                "or while on hold. You have already said goodbye; say nothing more.",
-                # The goodbye comes first (rule 7); no extra speech while hanging up.
-                "pre_tool_speech": "off",
+                "or while on hold.",
+                "pre_tool_speech": "auto",
             },
-            "send_dtmf": {},
+            "send_dtmf": {"pre_tool_speech": "off"},
             # On hold: wait silently without "are you there?" check-ins.
-            "skip_turn": {"wait_timeout_secs": -1},
+            "skip_turn": {"wait_timeout_secs": -1, "pre_tool_speech": "off"},
             # A phone menu can sound like voicemail; don't let detection hang up on it.
             "voicemail_detection": None,
         },

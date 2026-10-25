@@ -32,7 +32,7 @@ param convexUrl string = ''
 param telephony string = 'cartesia'
 param cartesiaVoiceId string = ''
 @description('Model the Cartesia agent runs (GET https://api.cartesia.ai/v1/agents/models).')
-param cartesiaAgentModel string = 'claude-haiku-5.5'
+param cartesiaAgentModel string = 'claude-haiku-4.5'
 param azureFoundryEndpoint string = ''
 param apnsKeyId string = ''
 param apnsTeamId string = ''

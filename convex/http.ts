@@ -29,7 +29,9 @@ http.route({
   handler: httpAction(async (ctx, request) => {
     const requested = new URL(request.url).pathname;
     const path = requested === "/" ? "/index.html"
-      : requested.endsWith("/") ? `${requested}index.html` : requested;
+      : requested.endsWith("/") ? `${requested}index.html`
+      : requested.split("/").at(-1)?.includes(".") ? requested
+      : `${requested}/index.html`;
     const asset = await ctx.runQuery(internal.site.asset, { path });
     if (!asset) return new Response("Not found", { status: 404 });
     const blob = await ctx.storage.get(asset.storage_id);

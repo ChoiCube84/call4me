@@ -13,7 +13,7 @@ serves `out/` at the site root, on the same origin as the API, so there is no No
 | `/` | Start a call: company, number, goal, rules, info call4me may share → `POST /calls` |
 | `/live/?id=…` | State banner + hold timer, large captions, question sheet, take over, hang up |
 | `/summary/?id=…` | Outcome, reference number (copy), minutes saved |
-| `/dashboard/` | Judges: recent calls, eval metrics, live captions, timeline, audit log |
+| `/dashboard/` | Judges: recent calls, live captions, timeline, audit log |
 
 Pages take the call id as a query param because a static export can't have dynamic segments.
 

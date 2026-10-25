@@ -8,7 +8,6 @@ import { TopBar } from "@/components/TopBar";
 import {
   type AuditRow,
   type CallSession,
-  type EvalReport,
   TERMINAL_STATES,
   type TimelineEvent,
   ApiError,
@@ -66,9 +65,7 @@ function Dashboard() {
   const select = (id: string) => router.replace(`/dashboard/?id=${encodeURIComponent(id)}`);
 
   const listCalls = useCallback(() => api.listCalls(20), []);
-  const metricsFn = useCallback(() => api.metrics(), []);
   const calls = usePoll<CallSession[]>(listCalls, 5000);
-  const metrics = usePoll<EvalReport>(metricsFn, 60000);
 
   return (
     <main className="min-h-dvh">
@@ -83,7 +80,6 @@ function Dashboard() {
               needed. A guard checks every action; private answers are spoken once and redacted.
             </p>
           </section>
-          <MetricsCard report={metrics.data} error={metrics.error} />
           <section className="rounded-2xl border border-line bg-panel p-4">
             <h2 className="text-lg font-bold">Recent calls</h2>
             {calls.error && <p className="mt-2 text-bad">{calls.error}</p>}
@@ -130,66 +126,6 @@ function StateChip({ state }: { state: string }) {
   const tone =
     state === "FAILED" ? "bg-bad text-black" : terminal ? "bg-panel-2 text-muted" : "bg-ok text-black";
   return <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${tone}`}>{state}</span>;
-}
-
-function MetricsCard({ report, error }: { report: EvalReport | null; error: string | null }) {
-  if (!report) {
-    return (
-      <section className="rounded-2xl border border-line bg-panel p-4">
-        <h2 className="text-lg font-bold">Eval results</h2>
-        <p className="mt-2 text-muted">{error ?? "Loading…"}</p>
-      </section>
-    );
-  }
-  const m = report.metrics;
-  const tiles: [string, string][] = [
-    ["Success", `${m.passed}/${m.scenarios} (${Math.round((m.success_rate ?? 0) * 100)}%)`],
-    ["Minutes saved", `${m.minutes_saved_total} (${m.minutes_saved_avg} avg)`],
-    ["Asked the user", String(m.times_asked_user)],
-    ["Safety violations", String(m.safety_violations)],
-    ["Guard denials", String(m.guard_denials)],
-    [
-      "Time to greet (median)",
-      typeof m.time_to_greet_ms_median === "number" ? `${m.time_to_greet_ms_median.toFixed(0)} ms` : "–",
-    ],
-  ];
-  return (
-    <section className="rounded-2xl border border-line bg-panel p-4">
-      <h2 className="text-lg font-bold">Eval results ({m.scenarios} scripted calls)</h2>
-      <dl className="mt-3 grid grid-cols-2 gap-2">
-        {tiles.map(([k, v]) => (
-          <div key={k} className="rounded-xl bg-black p-3">
-            <dt className="text-xs font-bold uppercase tracking-wide text-muted">{k}</dt>
-            <dd
-              className={`mt-1 text-lg font-extrabold ${
-                k === "Safety violations" ? (m.safety_violations === 0 ? "text-ok" : "text-bad") : ""
-              }`}
-            >
-              {v}
-            </dd>
-          </div>
-        ))}
-      </dl>
-      <table className="mt-4 w-full text-left text-sm">
-        <thead className="text-muted">
-          <tr>
-            <th className="py-1 font-semibold">Scenario</th>
-            <th className="py-1 font-semibold">Result</th>
-            <th className="py-1 text-right font-semibold">Saved</th>
-          </tr>
-        </thead>
-        <tbody>
-          {report.results.map((r) => (
-            <tr key={r.id} className="border-t border-line">
-              <td className="py-1.5 pr-2">{r.title || r.id}</td>
-              <td className={`py-1.5 font-bold ${r.passed ? "text-ok" : "text-bad"}`}>{r.passed ? "PASS" : "FAIL"}</td>
-              <td className="py-1.5 text-right">{r.minutes_saved} min</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
-  );
 }
 
 function CallPanel({ id }: { id: string }) {

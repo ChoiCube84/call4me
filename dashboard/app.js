@@ -1269,96 +1269,6 @@ $("start-form").addEventListener("submit", async (e) => {
 loadPrefs();
 
 // --------------------------------------------------------------------------
-// Eval metrics: GET /metrics (latest evals/results report)
-// --------------------------------------------------------------------------
-
-function statTile(n, label, cls) {
-  const d = el("div", "stat" + (cls ? " " + cls : ""));
-  d.appendChild(el("span", "stat-n", n));
-  d.appendChild(el("span", "stat-l", label));
-  return d;
-}
-
-async function loadMetrics() {
-  const msg = $("metrics-msg");
-  const tb = document.querySelector("#metrics-table tbody");
-  const tf = document.querySelector("#metrics-table tfoot");
-  const summary = $("metrics-summary");
-  let report;
-  try {
-    report = await http("GET", "/metrics");
-  } catch (err) {
-    tb.textContent = "";
-    tf.textContent = "";
-    summary.textContent = "";
-    $("metrics-meta").textContent = "";
-    msg.textContent = err.status === 404
-      ? "No eval report yet. Run: uv run python -m evals.run"
-      : `Could not load metrics: ${err.message}`;
-    return;
-  }
-  // Accept the report itself or a wrapper like {report: {...}}.
-  if (report && report.report) report = report.report;
-  const m = (report && report.metrics) || {};
-  const results = (report && report.results) || [];
-  const meta = (report && report.meta) || {};
-
-  // Always show which system produced the numbers: baseline numbers are not product numbers.
-  const metaParts = [];
-  if (meta.driver) metaParts.push(`Driver: ${meta.driver}`);
-  if (meta.guard) metaParts.push(`guard: ${meta.guard}`);
-  if (meta.clock) metaParts.push(`clock: ${meta.clock}`);
-  $("metrics-meta").textContent = metaParts.join(" · ");
-
-  summary.textContent = "";
-  const rate = m.success_rate != null ? `${Math.round(m.success_rate * 100)}%` : "–";
-  summary.append(
-    statTile(`${rate}`, `success (${m.passed ?? "?"}/${m.scenarios ?? "?"})`, m.passed === m.scenarios ? "good" : ""),
-    statTile(m.minutes_saved_avg != null ? fmtNum(m.minutes_saved_avg, 1) : "–", "avg min saved"),
-    statTile(m.times_asked_user ?? "–", "times asked user"),
-    statTile(m.guard_denials ?? "–", "guard blocks", m.guard_denials ? "deny" : ""),
-    statTile(m.time_to_greet_ms_median != null ? `${fmtNum(m.time_to_greet_ms_median, 2)} ms` : "–", "median time to greet"),
-    statTile(m.errors ?? "–", "errors", m.errors ? "deny" : ""),
-    statTile(m.safety_violations ?? "–", "safety violations", m.safety_violations ? "deny" : "good"),
-  );
-
-  tb.textContent = "";
-  for (const r of results) {
-    const tr = el("tr", r.passed ? "" : "deny");
-    const name = el("td");
-    name.appendChild(el("div", "", r.id));
-    if (r.title) name.appendChild(el("div", "muted", r.title));
-    tr.appendChild(name);
-    tr.appendChild(el("td", r.passed ? "pass" : "fail", r.passed ? "PASS" : "FAIL"));
-    tr.appendChild(el("td", "num", fmtNum(r.minutes_saved, 1)));
-    tr.appendChild(el("td", "num", r.asks ?? "–"));
-    const denials = Array.isArray(r.guard_denials) ? r.guard_denials.length : (r.guard_denials ?? "–");
-    tr.appendChild(el("td", "num", denials));
-    tr.appendChild(el("td", "num", r.time_to_greet_ms != null ? fmtNum(r.time_to_greet_ms, 2) : "–"));
-    const errs = Array.isArray(r.errors) ? r.errors.length : (r.errors ?? "–");
-    tr.appendChild(el("td", "num", errs));
-    const notes = [].concat(r.failures || [], r.violations || [], r.errors || [],
-      Array.isArray(r.guard_denials) ? r.guard_denials : []);
-    tr.appendChild(el("td", "evidence", notes.join("; ")));
-    tb.appendChild(tr);
-  }
-
-  tf.textContent = "";
-  const tr = el("tr");
-  tr.appendChild(el("td", "", "All scenarios"));
-  tr.appendChild(el("td", "", `${rate} (${m.passed ?? "?"}/${m.scenarios ?? "?"})`));
-  tr.appendChild(el("td", "num", m.minutes_saved_avg != null ? `${fmtNum(m.minutes_saved_avg, 1)} avg` : "–"));
-  tr.appendChild(el("td", "num", m.times_asked_user ?? "–"));
-  tr.appendChild(el("td", "num", m.guard_denials ?? "–"));
-  tr.appendChild(el("td", "num", m.time_to_greet_ms_median != null ? `${fmtNum(m.time_to_greet_ms_median, 2)} med` : "–"));
-  tr.appendChild(el("td", "num", m.errors ?? "–"));
-  tr.appendChild(el("td", "", m.minutes_saved_total != null ? `${fmtNum(m.minutes_saved_total, 1)} min saved in total` : ""));
-  tf.appendChild(tr);
-  msg.textContent = results.length ? "" : "Report has no scenarios.";
-}
-$("refresh-metrics").addEventListener("click", loadMetrics);
-
-// --------------------------------------------------------------------------
 // Boot
 // --------------------------------------------------------------------------
 
@@ -1367,7 +1277,6 @@ renderBanner();
 renderStats();
 searchCompanies("");
 loadRecentCalls();
-loadMetrics();
 {
   const m = location.hash.match(/call=([^&]+)/);
   if (m) joinCall(decodeURIComponent(m[1]));

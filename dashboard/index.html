@@ -12,7 +12,6 @@
     <nav>
       <a href="#live">Live</a>
       <a href="#records">Timeline + audit</a>
-      <a href="#evals">Evals</a>
     </nav>
     <div class="conn" id="conn" data-status="idle">No call</div>
   </header>
@@ -205,30 +204,6 @@
     </div>
   </section>
 
-  <!-- -------------------------------------------------------------- -->
-  <!-- Eval metrics                                                    -->
-  <!-- -------------------------------------------------------------- -->
-  <section id="evals" class="wide">
-    <div class="card">
-      <div class="card-head">
-        <h2>Eval suite</h2>
-        <button type="button" id="refresh-metrics" class="ghost small-btn">Refresh</button>
-      </div>
-      <p class="muted" id="metrics-meta"></p>
-      <div class="stats" id="metrics-summary"></div>
-      <div class="table-wrap">
-        <table class="table" id="metrics-table">
-          <thead><tr>
-            <th>Scenario</th><th>Result</th><th class="num">Min. saved</th><th class="num">Asks</th>
-            <th class="num">Guard blocks</th><th class="num">Greet (ms)</th><th class="num">Errors</th><th>Notes</th>
-          </tr></thead>
-          <tbody></tbody>
-          <tfoot></tfoot>
-        </table>
-      </div>
-      <p class="muted" id="metrics-msg"></p>
-    </div>
-  </section>
 
   <script src="app.js"></script>
 </body>

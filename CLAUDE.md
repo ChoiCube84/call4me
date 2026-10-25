@@ -275,7 +275,7 @@ The deployed Azure app currently runs `STORAGE_BACKEND=sql`.
 - `POST /requests/{id}/answer` — user's answer to `ask_user`
 - `GET /companies?q=` — company directory
 - `POST /devices` — APNs tokens (iOS app, shelved)
-- `GET /metrics` — latest eval report for the judges view
+- `GET /metrics` — latest eval report (JSON; no longer shown on the dashboards)
 - `POST /cartesia/webhook` · `POST /cartesia/tools/{name}` — Cartesia callbacks (tool-secret auth)
 - `GET /phone` + `WS /phone/ws` — phone-mode rep page
 - `/` — the web app; `/dashboard/` judges view; `/console/` backup console
@@ -294,7 +294,7 @@ The native iOS app is shelved (`ios/` stays in the repo, unmaintained): a free A
 - **Question sheet (`ask_user`):** full-screen color flash (a single color change with reduced motion) plus vibration where supported, a big question, and a text input → `POST /requests/{id}/answer`. The input clears at once. For `sensitivity=high` there is no answer box, only **"Say it myself"** → takeover. It closes on the `ask_user_answered` live event.
 - **Take over (type-to-talk):** `POST /calls/{id}/takeover`, then `POST /calls/{id}/type`. Quick phrases. Hand back with one tap. (Cartesia mode: see the table in section 2.)
 - **Summary (`/summary/?id=`):** outcome, reference number (large, copyable), minutes saved.
-- **Judges view (`/dashboard/`):** recent calls, eval metrics, a live call with its timeline and audit log (denials highlighted, private values shown as `[REDACTED]`).
+- **Judges view (`/dashboard/`):** recent calls, a live call with its timeline and audit log (denials highlighted, private values shown as `[REDACTED]`).
 - **Phone behavior:** Screen Wake Lock on the Live screen, a web app manifest for Add to Home Screen, large text (adjustable), big touch targets, plain short English.
 - **Alerts are visual (+ vibration), never sound-only** (rule 7). Web push is a later stretch goal, so the app must be open during a call.
 - **Access:** on Azure the API needs the access token (`API_TOKEN`). The app asks for it once, keeps it in localStorage, and sends it as `Authorization: Bearer` (or `?token=` on the WebSocket).
@@ -338,7 +338,7 @@ The fake support line (`fakeline/`): menu (1 orders, 2 billing, 0 agent), nested
 - **Unit tests:** `uv run pytest -q` (state transitions, guard rules, redaction, limits, full mock calls); `npm test` (Convex functions).
 - **Eval suite (`evals/`):** 11 scripted scenarios on the fake line with a scripted bot rep — cancellation, fee waiver, order status, callback offer, transfer back to hold, menu loop, rep asks for PIN, rep offers paid upgrade, rep refuses to talk to AI, user takeover, rep asks for an SSN.
 - `USE_MOCKS=false uv run python -m evals.run --driver product --guard real` runs our phone-mode pipeline with real Claude and Jev: `evals/results/product-claude.json` passed **11/11** with 0 safety violations. This measures phone mode, not the Cartesia agent.
-- **Metrics:** success rate, avg minutes saved, # times asked user, errors, guard denials, time-to-greet. Shown on the judges view via `GET /metrics`.
+- **Metrics:** success rate, avg minutes saved, # times asked user, errors, guard denials, time-to-greet. Saved in `evals/results/`; also served as JSON at `GET /metrics`.
 
 ---
 
@@ -392,7 +392,7 @@ Before demoing a Cartesia call, test one by calling your own cell. Keep a record
 4. Rep asks for the account PIN → the screen flashes → the user types → the agent relays it; it shows as `[REDACTED]` everywhere.
 5. Rep offers a paid upgrade → `check_offer` / guard says no → the agent declines.
 6. Fee waived, reference number → summary "34 minutes saved."
-7. Proof: eval table, Azure deployment, audit log with the PIN redacted.
+7. Proof: eval results (11/11), Azure deployment, audit log with the PIN redacted.
 
 ---
 

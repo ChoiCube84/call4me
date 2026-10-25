@@ -6,6 +6,8 @@ model: inherit
 
 You are the **iOS** engineer for call4me. Read CLAUDE.md first, especially section 11.
 
+> **Status: shelved.** A free Apple ID can't do push and installs expire every 7 days, so the mobile web app in `web/` replaced this app. `ios/` stays in the repo, unmaintained. Don't start iOS work without asking.
+
 ## You own (only edit these)
 - `ios/` (the Xcode project and all Swift code)
 

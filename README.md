@@ -13,10 +13,10 @@ Built at Cal Hacks 13.0 for Deaf and hard-of-hearing adults. Full design: `CLAUD
 ```
 Phone browser: web app (/)  ──REST + WebSocket (token)──▶  Backend (FastAPI) on Azure Container Apps
 Judges view (/dashboard/)                                   ├─ serves the web app (static Next.js export)
-                                                            ├─ Call state engine ── Jev (TypeSafe) decisions
+                                                            ├─ Call state engine ── Jev (TypeSafe) decisions (phone mode)
                                                             ├─ Claude: conversation, greeting, summaries
                                                             ├─ Guard: disclosure, privacy, limits (in code)
-                                                            ├─ Convex (or PostgreSQL) · Key Vault · Application Insights
+                                                            ├─ PostgreSQL (default) or Convex · Key Vault · Application Insights
                                                             ▼
                                    Cartesia: voice agent that dials the company (TELEPHONY=cartesia)
                                    or our own pipeline + fake line (TELEPHONY=phone)
@@ -42,17 +42,21 @@ before it is spoken. In `cartesia` mode Cartesia's agent speaks for itself: the 
 the limits, and the no-SSN rule are in its instructions, and offers go through our
 `check_offer` tool. Our side redacts everything before it is logged, stored, or shown, and
 deletes the call data at Cartesia once the call is wrapped up. The guard still can't block
-a sentence before Cartesia's agent says it.
+a sentence before Cartesia's agent says it. Takeover differs too: Cartesia's agent can't be
+muted from outside, so what you type is queued and the agent says it word for word on its
+next tool call. Jev is used only in `phone` mode; in `cartesia` mode the agent reports where
+the call is (menu, hold, person) through our `report_state` tool.
 
-## Convex migration
+## Storage: PostgreSQL or Convex
 
-The `codex/convex-migration` branch supports Convex for call records, questions,
-audit logs, devices, saved menus, and reactive live captions. Python remains the
-single call worker; private answers are delivered in memory only. Existing SQL
-installations keep working until `STORAGE_BACKEND=convex` is selected.
+PostgreSQL is the default (`STORAGE_BACKEND=sql`), and it's what the Azure deployment runs.
+Set `STORAGE_BACKEND=convex` to move everything to Convex instead: call records, questions
+(never the answers), the audit log, saved menu routes, and devices, plus the live caption
+feed, which the web app then gets from Convex subscriptions with 24-hour replay. Python
+stays the single call worker: calls, the guard, and private answers never go through
+Convex. No Convex project or credentials are committed; each deployment connects its own.
 
 See [setup, tests, SQL data copy, and teammate handoff](docs/convex-migration.md).
-Each teammate can connect their own Convex deployment without changing source.
 
 ## Run it locally
 
@@ -86,8 +90,8 @@ az login                      # the subscription with the credits
 ./infra/deploy.sh             # resource group call4me-rg in northcentralus
 ```
 
-This creates Container Apps, PostgreSQL, Key Vault, Application Insights, and a container
-registry. It copies the secrets from `.env` into Key Vault, then builds the image (web app
+This creates Container Apps, PostgreSQL (skipped with `STORAGE_BACKEND=convex`), Key Vault,
+Application Insights, and a container registry. It copies the secrets from `.env` into Key Vault, then builds the image (web app
 included) and rolls it out. It prints the web app URL.
 Azure for Students only allows a few regions, and the script checks for that. Details and
 troubleshooting: `infra/README.md`.
@@ -107,7 +111,8 @@ Chrome > menu > **Install app**. Enter the access code once. During a call:
 - When the agent needs something only you know, the whole screen flashes and the phone
   vibrates where supported. Nothing relies on sound. Type the answer. For private items (full
   card number, SSN, password), tap **Say it myself** and type it to the rep.
-- **Take over** at any time and type. call4me speaks your words. Hand back with one tap.
+- **Take over** at any time and type. call4me speaks your words (in `cartesia` mode, on the
+  agent's next turn). Hand back with one tap.
 - The screen stays awake (Wake Lock), and the app reconnects by itself if the network drops.
 
 Keep the app open during a call. Web push notifications are a later stretch goal. The judges
@@ -134,7 +139,9 @@ pipeline (phone mode) with real Claude and Jev and the real guard:
 | `backend/auth.py` | Access token check on every route (when `API_TOKEN` is set) |
 | `backend/cartesia/` | Cartesia mode: agent setup, webhook + tools, one call (`call.py`) |
 | `backend/calls.py` | Phone/mock mode: telephony → audio → STT → engine → Claude → guard → TTS |
-| `backend/engine/` | Call states, Jev checks, menu navigation, human detection |
+| `backend/engine/` | Call states, Jev checks, menu navigation, human detection (phone mode) |
+| `backend/db/` | Models, `store.py` (SQL or Convex), Convex client |
+| `convex/`, `docs/convex-migration.md` | Convex schema, storage, live replay; setup guide |
 | `backend/agent/` | Claude tool-use loop, `ask_user`, guard layer |
 | `backend/telephony/`, `fakeline/` | Phone-mode line (`/phone` page) and mock line; the fake company's menu and hold audio |
 | `backend/audio/`, `backend/speech/` | VAD, music classifier; Cartesia STT/TTS |

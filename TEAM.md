@@ -2,17 +2,20 @@
 
 Seven specialist agents build call4me at the same time, each owning its own folders so they never edit the same files.
 
+> **Status:** this is how the first build was run. Since then Twilio was replaced by Cartesia agents (`backend/cartesia/`), the iOS app was shelved for the mobile web app (`web/`), and Convex was added as an optional store (`convex/`, `backend/db/store.py`). Those newer areas were built after the team phase and have no specialist agent; the lead owns them. CLAUDE.md describes the current system.
+
 ## The team
 
 | Agent | Owns | Main job |
 |---|---|---|
 | `platform` | `backend/main.py`, `config.py`, `contracts.py`, `db/`, `audit/`, `notify/`, Docker, infra | Scaffold, shared contracts, DB, endpoints, audit log, Azure deploy |
-| `telephony` | `backend/telephony/`, `fakeline/` | Twilio calls, media stream, digits, takeover conference, fake support line |
+| `telephony` | `backend/telephony/`, `fakeline/` | Phone-mode line (`/phone` rep page), mock line, fake support line (originally Twilio) |
 | `audio-speech` | `backend/audio/`, `backend/speech/` | Audio decoding, VAD, music detection, Cartesia STT and TTS |
-| `call-engine` | `backend/engine/` | State machine, Jev decisions, menu navigation, human detection |
+| `call-engine` | `backend/engine/` | State machine, Jev decisions, menu navigation, human detection (phone mode) |
 | `conversation-agent` | `backend/agent/` | Claude tool-use loop, `ask_user`, guard layer |
-| `ios-app` | `ios/` | SwiftUI app, captions, Live Activity, push answers, takeover |
-| `qa-evals` | `evals/`, `tests/integration/`, `dashboard/` | Bot rep, 10 scenarios, metrics, demo dashboard, reviews |
+| `ios-app` | `ios/` | Shelved SwiftUI app (replaced by `web/`) |
+| `qa-evals` | `evals/`, `tests/integration/`, `dashboard/` | Bot rep, 11 scenarios, metrics, backup console, reviews |
+| lead (no agent) | `backend/cartesia/`, `web/`, `convex/`, `scripts/` | Cartesia real calls, mobile web app + judges view, Convex storage |
 
 Definitions live in `.claude/agents/`. They can be used as subagents, as agent-team teammates, or as the role for a separate session.
 
@@ -94,7 +97,7 @@ Merge in this order: platform → telephony → audio → engine → agent → i
 |---|---|---|
 | Gate 1 (Fri night) | lead or you | Agent calls the fake line; audio reaches the server |
 | Gate 2 (Sat ~1 PM) | `qa-evals` | Full fake-line call including `ask_user` passes |
-| Gate 3 (Sat ~7 PM) | everyone | Feature freeze; iPhone app works end to end |
+| Gate 3 (Sat ~7 PM) | everyone | Feature freeze; app works end to end (the mobile web app after the iOS app was shelved) |
 
 At each gate, ask `qa-evals` to review all areas against CLAUDE.md section 2 (safety rules).
 

@@ -6,8 +6,10 @@ model: inherit
 
 You are the **audio and speech** engineer for call4me. Read CLAUDE.md first.
 
+> **Status:** this pipeline runs in phone mode (`TELEPHONY=phone`) and mock mode. In cartesia mode (real calls) Cartesia's agent does its own listening and speaking. VAD and the music classifier are lightweight stand-ins for Silero and YAMNet behind the same interfaces. References to Twilio below are from the original plan; phone mode uses the same 8 kHz mu-law framing.
+
 ## You own (only edit these)
-- `backend/audio/` (decode mu-law, resample with soxr, Silero VAD, YAMNet music classifier)
+- `backend/audio/` (decode mu-law, resample with soxr, energy VAD, time-domain music classifier, echo)
 - `backend/speech/` (Cartesia streaming STT client, Cartesia Sonic streaming TTS client)
 
 ## Build, in order

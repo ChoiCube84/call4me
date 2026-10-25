@@ -40,12 +40,20 @@ audio, menu tones and PIN tones after deployment.
 The app sends a PIN or other private answer to its same-origin HTTPS endpoint. An
 HTTP action encrypts it with AES-GCM before writing to Convex. The waiting Cartesia
 tool decrypts it, deletes the ciphertext from Convex, and returns the answer once.
-An abandoned ciphertext expires after 60 seconds; a 30-second cleanup interval
-removes it well within two minutes. Finishing a call also deletes its
-remaining answers and typed messages. Raw values are never written to call records,
-captions, audit logs or live replay. Cartesia necessarily receives the answer to
-speak it or send its keypad tones; call data at Cartesia is deleted on completion,
-with a retry job if that delete fails.
+An abandoned answer is marked to expire after 60 seconds; typed messages use 90
+seconds. A cleanup job runs every 30 seconds and removes up to 100 expired rows
+from each table per run. This targets short retention under normal operation, not
+a strict two-minute deletion guarantee: delayed jobs or a backlog can extend it.
+The answer polling query currently does not reject expired rows before cleanup.
+Finishing a call also deletes its remaining answers and typed messages.
+
+The answer endpoint does not put plaintext in ordinary call records or audit
+payloads. Webhook captions and summaries use pattern-based redaction for email
+addresses and numeric strings of four or more digits. Arbitrary private text,
+shorter codes and digits transcribed as words are not guaranteed to be removed;
+do not describe this as universal redaction. Cartesia necessarily receives the
+answer to speak it or send its keypad tones. Deletion of its call data is attempted
+on completion, with a five-minute retry job if that delete fails.
 
 The mobile home-screen app installed from an old temporary tunnel has a different
 origin. Open the production URL on the phone and add that page to the home screen
